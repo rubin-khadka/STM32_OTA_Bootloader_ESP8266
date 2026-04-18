@@ -9,6 +9,7 @@
 #include "W25q64.h"
 #include "spi2.h"
 #include "dwt.h"
+#include "usart1.h"
 
 // W25Q64 Commands
 #define W25Q64_CMD_RESET            0x99

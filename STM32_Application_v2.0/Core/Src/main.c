@@ -30,6 +30,7 @@
 #include "lcd.h"
 #include "button.h"
 #include "ds3231.h"
+#include "mpu6050.h"
 #include "tasks.h"
 #include <stdint.h>
 /* USER CODE END Includes */
@@ -47,6 +48,7 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define DHT11_READ_TICKS      100
+#define MPU_READ_TICKS        5
 #define LCD_UPDATE_TICKS      10
 /* USER CODE END PM */
 
@@ -114,13 +116,20 @@ int main(void)
   USART2_SendString("STM32 Project Initialization\r\n");
   USART2_SendString("============================\r\n");
 
+  LCD_Clear();
+  LCD_SendString("STM32 PROJECT");
+  LCD_SetCursor(1, 0);
+  LCD_SendString("INITIALIZING...");
+
   // Initialize sensors
   DS3231_Init();
+  MPU6050_Init();
   DHT11_Init();
 
   // Loop counters
   uint16_t dht_count = 0;
   uint16_t lcd_count = 0;
+  uint16_t mpu_count = 0;
 
   Button_Init();
 
@@ -136,13 +145,20 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // Run Tasks at Different Rates
 
+    // Run Tasks at Different Rates
     // Read DHT11 every 1 seconds
     if(dht_count++ >= DHT11_READ_TICKS)
     {
       dht_count = 0;
       Task_DHT11_Read();
+    }
+
+    // Read MPU6050 every 50ms
+    if(mpu_count++ >= MPU_READ_TICKS)
+    {
+      mpu_count = 0;
+      Task_MPU6050_Read();
     }
 
     // Update LCD every 100ms
@@ -218,7 +234,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
