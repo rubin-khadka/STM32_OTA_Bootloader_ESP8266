@@ -12,24 +12,24 @@
 #define W25Q64_ERROR    1
 #define W25Q64_BUSY     2
 
-// Function Prototypes
-void W25Q64_Init(void);
+// Page and sector sizes
+#define W25Q64_PAGE_SIZE    256
+#define W25Q64_SECTOR_SIZE  4096
 
-// Status functions
+// Function Prototypes - Byte Address Interface
 void W25Q64_Reset(void);
+uint32_t W25Q64_ReadID(void);
 uint8_t W25Q64_ReadStatus(void);
-void W25Q64_WriteEnable(void);
-void W25Q64_WriteDisable(void);
-uint32_t bytestowrite(uint32_t size, uint16_t offset);
 
 // Read functions
-void W25Q64_Read(uint32_t startPage, uint8_t offset, uint32_t size, uint8_t *rData);
-void W25Q64_FastRead(uint32_t startPage, uint8_t offset, uint32_t size, uint8_t *rData);
+void W25Q64_Read(uint32_t addr, uint8_t *data, uint32_t len);
+void W25Q64_FastRead(uint32_t addr, uint8_t *data, uint32_t len);
 
-// Erase function
-uint8_t W25Q64_EraseSector(uint32_t sector_num);
+// Erase functions
+void W25Q64_EraseSector(uint32_t addr);
+void W25Q64_Erase(uint32_t start_addr, uint32_t size);
 
 // Write function
-void W25Q64_WritePage(uint32_t page, uint16_t offset, uint32_t size, uint8_t *data);
+void W25Q64_Write(uint32_t addr, uint8_t *data, uint32_t len);
 
 #endif /* W25Q64_H_ */
