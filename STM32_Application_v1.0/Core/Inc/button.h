@@ -24,4 +24,8 @@ void TIMER4_Init(void);
 DisplayMode_t Button_GetMode(void);
 void Button_NextMode(void);
 
+// OTA trigger functions
+uint8_t Button_IsOTATriggered(void);
+void Button_ClearOTATrigger(void);
+
 #endif /* BUTTON_H_ */

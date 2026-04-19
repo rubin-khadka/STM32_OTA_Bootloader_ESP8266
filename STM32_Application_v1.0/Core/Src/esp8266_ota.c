@@ -5,12 +5,6 @@
  *      Author: Rubin Khadka
  */
 
-/*
- * esp8266_ota.c
- * ESP8266 + STM32 + OTA (DMA RX, Streaming Mode)
- * Downloads firmware to W25Q64 and signals STM32 bootloader
- */
-
 #include "esp8266_ota.h"
 #include "flash_layout.h"
 #include "app_ota.h"
@@ -30,8 +24,8 @@
 #define OTA_ACK_CHUNK           512
 #define OTA_FLASH_OFFSET        0           // Start address in W25Q64
 
-#define WiFi_ssid               "Arun_Rawat"
-#define WiFi_pssd               "arun@321"
+#define WiFi_ssid               "mynoobu"
+#define WiFi_pssd               "Sarah159!"
 #define SERVER_IP               "192.168.1.6"
 #define SERVER_PORT             5678
 

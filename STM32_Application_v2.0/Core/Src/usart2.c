@@ -42,7 +42,7 @@ void USART2_Init(void)
   // Disable USART2 during configuration
   USART2->CR1 &= ~USART_CR1_UE;
 
-  USART2->BRR = 0x139;  // 72MHz/115200 = 625 = 0x271
+  USART2->BRR = 0x139;
 
   // Clear status
   USART2->SR = 0;

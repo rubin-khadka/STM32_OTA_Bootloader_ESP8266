@@ -51,15 +51,13 @@ void USART1_Init(void)
   DMA1_Channel5->CCR &= ~DMA_CCR_EN;
 
   // Configure DMA
-  DMA1_Channel5->CPAR = (uint32_t) &USART1->DR;            // Peripheral address
+  DMA1_Channel5->CPAR = (uint32_t) &(USART1->DR);            // Peripheral address
   DMA1_Channel5->CMAR = (uint32_t) usart1_rx_dma_buffer;   // Memory address
   DMA1_Channel5->CNDTR = USART1_RX_DMA_SIZE;   // Number of bytes
 
   DMA1_Channel5->CCR = 0;   // Reset Register First
   DMA1_Channel5->CCR = DMA_CCR_MINC |         // Memory increment
       DMA_CCR_CIRC |        // Circular mode
-      DMA_CCR_PSIZE_0 |     // 8-bit peripheral
-      DMA_CCR_MSIZE_0 |     // 8-bit memory
       DMA_CCR_PL;           // Highest priority
 
   // Enable DMA channel

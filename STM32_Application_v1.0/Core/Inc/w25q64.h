@@ -17,6 +17,7 @@
 #define W25Q64_SECTOR_SIZE  4096
 
 // Function Prototypes - Byte Address Interface
+void W25Q64_Init(void);
 void W25Q64_Reset(void);
 uint32_t W25Q64_ReadID(void);
 uint8_t W25Q64_ReadStatus(void);
