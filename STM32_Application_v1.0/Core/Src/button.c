@@ -14,6 +14,7 @@ static volatile DisplayMode_t current_mode = DISPLAY_MODE_TEMP_HUM;
 
 // Button states for debouncing
 static volatile uint8_t button1_pressed = 0;  // PA0 - Mode switch
+static volatile uint8_t button2_pressed = 0;  // OTA update
 
 void Button_Init(void)
 {

@@ -8,7 +8,8 @@
 #ifndef INC_APP_OTA_H_
 #define INC_APP_OTA_H_
 
-#define APP_MAGIC 0xABCDEFAB
+#define APP_MAGIC 0xDEADBEEF
+
 typedef struct
 {
     uint32_t magic;        // OTA image magic

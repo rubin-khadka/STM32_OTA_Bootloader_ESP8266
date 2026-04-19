@@ -1,7 +1,7 @@
 /*
  * dwt.h
  *
- *  Created on: Feb 25, 2026
+ *  Created on: Apr 19, 2026
  *      Author: Rubin Khadka
  */
 
@@ -16,6 +16,7 @@
 
 // Function Definitions
 void DWT_Init(void);
+uint32_t DWT_GetTick(void);
 void DWT_Delay_us(uint32_t us);
 void DWT_Delay_ms(uint32_t ms);
 

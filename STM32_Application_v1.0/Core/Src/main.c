@@ -21,17 +21,31 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+
+#include "flash_layout.h"
+#include "app_ota.h"
+#include "esp8266_ota.h"
+#include "w25q64.h"
+#include "app_header.h"
+
 #include "dwt.h"
 #include "timer2.h"
 #include "timer3.h"
-#include "usart2.h"
-#include "dht11.h"
 #include "i2c2.h"
+
 #include "lcd.h"
+#include "usart1.h"
+#include "usart2.h"
+
 #include "button.h"
+#include "dht11.h"
 #include "ds3231.h"
+
 #include "tasks.h"
+
 #include <stdint.h>
+#include <stdlib.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -87,7 +101,9 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  // Relocate vector table to application address
+  SCB->VTOR = APP_START_ADDR;
+  __enable_irq();
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -105,14 +121,34 @@ int main(void)
   DWT_Init();
   TIMER2_Init();
   TIMER4_Init();
+  USART1_Init();
   USART2_Init();
   I2C2_Init();
   LCD_Init();
 
+  // Initialize OTA module
+  ESP_Init();
+
+  // Initialize W25Q64
+  W25Q64_Reset();
+  uint32_t flash_id = W25Q64_ReadID();
+
+  // Read current app version from header
+  app_header_t* header = (app_header_t*)APP_HEADER_ADDR;
+  int version = (header->magic == 0xDEADBEEF) ? header->version : 0;
+
   // Welcome Message
-  USART2_SendString("============================\r\n");
-  USART2_SendString("STM32 Project Initialization\r\n");
-  USART2_SendString("============================\r\n");
+  USART2_SendString("\r\n====================================\r\n");
+  USART2_SendString("Sensor Monitoring System v");
+  USART2_SendNumber(version);
+  USART2_SendString("\r\n");
+  USART2_SendString("Flash ID: 0x");
+  USART2_SendHex((flash_id >> 16) & 0xFF);
+  USART2_SendHex((flash_id >> 8) & 0xFF);
+  USART2_SendHex(flash_id & 0xFF);
+  USART2_SendString("\r\n");
+  USART2_SendString("Press User Button to start OTA\r\n");
+  USART2_SendString("====================================\r\n\r\n");
 
   // Initialize sensors
   DS3231_Init();
@@ -137,7 +173,6 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     // Run Tasks at Different Rates
-
     // Read DHT11 every 1 seconds
     if(dht_count++ >= DHT11_READ_TICKS)
     {
