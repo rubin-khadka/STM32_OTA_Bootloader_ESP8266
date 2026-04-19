@@ -1,26 +1,31 @@
 /*
  * usart1.c
  *
- *  Created on: Mar 10, 2026
+ *  Created on: Apr 19, 2026
  *      Author: Rubin Khadka
  */
 
+#include "main.h"
 #include "usart1.h"
-#include "stm32f103xb.h"
 
-#define USART1_RX_BUF_SIZE 512
-#define USART1_TX_BUF_SIZE 256
+#define USART1_RX_DMA_SIZE 512    // DMA buffer for firmware reception
+#define USART1_TX_BUF_SIZE 256    // TX ring buffer for commands
 
-/* Global buffer instances */
-static uint8_t USART1_rxbuf_storage[USART1_RX_BUF_SIZE];
+/* DMA buffer for RX */
+static uint8_t usart1_rx_dma_buffer[USART1_RX_DMA_SIZE];
+static volatile uint16_t usart1_rx_read_pos = 0;
+
+/* TX ring buffer */
 static uint8_t USART1_txbuf_storage[USART1_TX_BUF_SIZE];
-volatile USART1_Buffer_t usart1_rx_buf;
 volatile USART1_Buffer_t usart1_tx_buf;
+
+static volatile uint8_t usart1_rx_chunk_ready = 0;
 
 void USART1_Init(void)
 {
   // Enable clocks
   RCC->APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_USART1EN;
+  RCC->AHBENR |= RCC_AHBENR_DMA1EN;  // Enable DMA1 clock
 
   // PA9 as TX (Alternate function push-pull)
   GPIOA->CRH &= ~(GPIO_CRH_CNF9 | GPIO_CRH_MODE9);
@@ -33,23 +38,134 @@ void USART1_Init(void)
   // Disable USART
   USART1->CR1 &= ~USART_CR1_UE;
 
-  // 115200 baud @ 8MHz
-  USART1->BRR = 0x45;
-  // USART1->BRR = 0x271;
+  // 115200 baud @ 72MHz
+  USART1->BRR = 0x271;
 
   // Clear status
   USART1->SR = 0;
 
-  // Initialize buffers
-  UART1_BufferInit(&usart1_rx_buf, USART1_rxbuf_storage, USART1_RX_BUF_SIZE);
+  // Initialize TX Buffer
   UART1_BufferInit(&usart1_tx_buf, USART1_txbuf_storage, USART1_TX_BUF_SIZE);
 
-  // Configure USART
-  USART1->CR1 = USART_CR1_RE | USART_CR1_TE | USART_CR1_RXNEIE | USART_CR1_UE;
+  // Configure DMA for RX (Circular Mode)
+  DMA1_Channel5->CCR &= ~DMA_CCR_EN;
 
-  // Enable interrupt in NVIC
-  NVIC_EnableIRQ(USART1_IRQn);
+  // Configure DMA
+  DMA1_Channel5->CPAR = (uint32_t) &USART1->DR;            // Peripheral address
+  DMA1_Channel5->CMAR = (uint32_t) usart1_rx_dma_buffer;   // Memory address
+  DMA1_Channel5->CNDTR = USART1_RX_DMA_SIZE;   // Number of bytes
+
+  DMA1_Channel5->CCR = 0;   // Reset Register First
+  DMA1_Channel5->CCR = DMA_CCR_MINC |         // Memory increment
+      DMA_CCR_CIRC |        // Circular mode
+      DMA_CCR_PSIZE_0 |     // 8-bit peripheral
+      DMA_CCR_MSIZE_0 |     // 8-bit memory
+      DMA_CCR_PL;           // Highest priority
+
+  // Enable DMA channel
+  DMA1_Channel5->CCR |= DMA_CCR_EN;
+
+  // Enable USART DMA RX
+  USART1->CR3 |= USART_CR3_DMAR;
+
+  // Configure USART
+  USART1->CR1 = USART_CR1_RE | USART_CR1_TE | USART_CR1_UE;
+
+  // Enable Interrupts
+  NVIC_EnableIRQ(DMA1_Channel5_IRQn);   // DMA
+  NVIC_EnableIRQ(USART1_IRQn);          // TX
 }
+
+// Get current DMA write position
+uint16_t USART1_DMA_GetWritePos(void)
+{
+  return USART1_RX_DMA_SIZE - DMA1_Channel5->CNDTR;
+}
+
+bool USART1_DMA_WaitForChunk(uint32_t timeout_ms)
+{
+  uint32_t start = HAL_GetTick();
+  while(!usart1_rx_chunk_ready)
+  {
+    if((HAL_GetTick() - start) > timeout_ms)
+    {
+      return false;  // Timeout
+    }
+  }
+  usart1_rx_chunk_ready = 0;
+  return true;
+}
+
+// Get number of bytes available in DMA buffer
+uint16_t USART1_DMA_GetAvailable(void)
+{
+  uint16_t write_pos = USART1_DMA_GetWritePos();
+  uint16_t read_pos = usart1_rx_read_pos;
+
+  if(write_pos >= read_pos)
+  {
+    return write_pos - read_pos;
+  }
+  else
+  {
+    return (USART1_RX_DMA_SIZE - read_pos) + write_pos;
+  }
+}
+
+// Read data directly from DMA buffer
+uint16_t USART1_DMA_Read(uint8_t *buffer, uint16_t max_len)
+{
+  uint16_t available = USART1_DMA_GetAvailable();
+  uint16_t to_read = (available < max_len) ? available : max_len;
+  uint16_t read_pos = usart1_rx_read_pos;
+
+  for(uint16_t i = 0; i < to_read; i++)
+  {
+    buffer[i] = usart1_rx_dma_buffer[read_pos];
+    read_pos++;
+    if(read_pos >= USART1_RX_DMA_SIZE)
+    {
+      read_pos = 0;
+    }
+  }
+
+  usart1_rx_read_pos = read_pos;
+  return to_read;
+}
+
+// Read exact 512-byte chunk
+uint16_t USART1_DMA_ReadChunk(uint8_t *buffer)
+{
+  // Wait for full 512-byte chunk
+  while(USART1_DMA_GetAvailable() < 512);
+
+  // Read exactly 512 bytes
+  return USART1_DMA_Read(buffer, 512);
+}
+
+// Check if 512-byte chunk is ready (non-blocking)
+bool USART1_DMA_IsChunkReady(void)
+{
+  return (USART1_DMA_GetAvailable() >= 512);
+}
+
+// DMA Interrupt Handler
+void DMA1_Channel5_IRQHandler(void)
+{
+  if(DMA1->ISR & DMA_ISR_TCIF5)
+  {
+    // Full 512-byte transfer complete
+    DMA1->IFCR |= DMA_IFCR_CTCIF5;
+    usart1_rx_chunk_ready = 1;
+  }
+
+  if(DMA1->ISR & DMA_ISR_HTIF5)
+  {
+    DMA1->IFCR |= DMA_IFCR_CHTIF5;
+  }
+}
+
+// ========== TX Buffer Functions ==========
 
 void UART1_BufferInit(volatile USART1_Buffer_t *buff, uint8_t *storage, uint16_t size)
 {
@@ -65,13 +181,11 @@ bool USART1_BufferEmpty(volatile USART1_Buffer_t *buff)
   return (buff->count == 0);
 }
 
-// Check if buffer is full
 bool USART1_BufferFull(volatile USART1_Buffer_t *buff)
 {
   return (buff->count >= buff->size);
 }
 
-// Write to ANY buffer (TX or RX)
 bool USART1_BufferWrite(volatile USART1_Buffer_t *buff, uint8_t data)
 {
   __disable_irq();
@@ -79,7 +193,7 @@ bool USART1_BufferWrite(volatile USART1_Buffer_t *buff, uint8_t data)
   if(USART1_BufferFull(buff))
   {
     __enable_irq();
-    return false;  // Buffer full
+    return false;
   }
 
   buff->buffer[buff->head] = data;
@@ -90,13 +204,6 @@ bool USART1_BufferWrite(volatile USART1_Buffer_t *buff, uint8_t data)
   return true;
 }
 
-// Check if RX data is available
-bool USART1_DataAvailable(void)
-{
-  return !USART1_BufferEmpty(&usart1_rx_buf);
-}
-
-// Read from ANY buffer
 uint8_t USART1_BufferRead(volatile USART1_Buffer_t *buff)
 {
   uint8_t data = 0;
@@ -114,23 +221,18 @@ uint8_t USART1_BufferRead(volatile USART1_Buffer_t *buff)
   return data;
 }
 
+// Send character using TX buffer (for commands)
 void USART1_SendChar(char c)
 {
-  // Wait if TX buffer is full
   while(USART1_BufferFull(&usart1_tx_buf));
 
   __disable_irq();
-
-  // Write to TX buffer
   USART1_BufferWrite(&usart1_tx_buf, (uint8_t) c);
-
-  // ALWAYS enable TX interrupt
   USART1->CR1 |= USART_CR1_TXEIE;
-
   __enable_irq();
 }
 
-// Send a string
+// Send string using TX buffer
 void USART1_SendString(const char *str)
 {
   while(*str)
@@ -139,39 +241,31 @@ void USART1_SendString(const char *str)
   }
 }
 
-// Get a character from RX buffer
-uint8_t USART1_GetChar(void)
-{
-  return USART1_BufferRead(&usart1_rx_buf);
-}
-
-// Send a 32-bit number as ASCII string via UART
+// Send number as string
 void USART1_SendNumber(uint32_t num)
 {
   char buffer[16];
   int i = 0;
 
-  // Handle 0 separately
   if(num == 0)
   {
     USART1_SendChar('0');
     return;
   }
 
-  // Convert number to string (reverse order)
   while(num > 0)
   {
     buffer[i++] = '0' + (num % 10);
     num /= 10;
   }
 
-  // Send in correct order
   while(i > 0)
   {
     USART1_SendChar(buffer[--i]);
   }
 }
 
+// Send hex byte
 void USART1_SendHex(uint8_t value)
 {
   char hex[3];
@@ -181,26 +275,17 @@ void USART1_SendHex(uint8_t value)
   USART1_SendString(hex);
 }
 
+// USART1 TX Interrupt Handler
 void USART1_IRQHandler(void)
 {
-  // Handle received data - WRITE to RX buffer
-  if(USART1->SR & USART_SR_RXNE)
-  {
-    uint8_t data = USART1->DR;
-    // Write to RX buffer (ignore if full - data lost)
-    USART1_BufferWrite(&usart1_rx_buf, data);
-  }
-
-  // Handle transmit - READ from TX buffer
+  // Handle TX interrupt
   if((USART1->CR1 & USART_CR1_TXEIE) && (USART1->SR & USART_SR_TXE))
   {
     if(!USART1_BufferEmpty(&usart1_tx_buf))
     {
-      // Read from TX buffer and send
       USART1->DR = USART1_BufferRead(&usart1_tx_buf);
     }
 
-    // Disable TX interrupt if buffer is empty
     if(USART1_BufferEmpty(&usart1_tx_buf))
     {
       USART1->CR1 &= ~USART_CR1_TXEIE;
