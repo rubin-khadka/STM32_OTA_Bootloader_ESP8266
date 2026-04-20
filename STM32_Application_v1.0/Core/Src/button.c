@@ -8,6 +8,7 @@
 #include "stm32f103xb.h"
 #include "button.h"
 #include "timer2.h"
+#include "ota_handler.h"
 
 // Current display mode
 static volatile DisplayMode_t current_mode = DISPLAY_MODE_TEMP_HUM;
@@ -146,10 +147,7 @@ void TIM4_IRQHandler(void)
       // Check if button is still pressed
       if(!(GPIOA->IDR & GPIO_IDR_IDR1))
       {
-        Button_NextMode();
-        // Set OTA trigger flag
-//        extern volatile uint8_t ota_trigger;  // Declared in main.c
-//        ota_trigger = 1;
+        ota_button_trigger = 1;
       }
       EXTI->IMR |= EXTI_IMR_MR1;  // Re-enable interrupt
     }

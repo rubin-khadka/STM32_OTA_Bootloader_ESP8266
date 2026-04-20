@@ -26,7 +26,7 @@
 
 #define WiFi_ssid               "mynoobu"
 #define WiFi_pssd               "Sarah159!"
-#define SERVER_IP               "192.168.1.6"
+#define SERVER_IP               "10.201.248.65"
 #define SERVER_PORT             5678
 
 /* ================= OTA HEADER ================= */

@@ -27,6 +27,7 @@
 #include "esp8266_ota.h"
 #include "w25q64.h"
 #include "app_header.h"
+#include "ota_handler.h"
 
 #include "dwt.h"
 #include "timer2.h"
@@ -83,13 +84,49 @@ static void MX_SPI2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void ESP8266_Get_IP(void)
+{
+  USART2_SendString("\r\n=== Get ESP8266 IP ===\r\n");
 
+  // Flush any pending data
+  uint16_t available = USART1_DMA_GetAvailable();
+  if(available > 0)
+  {
+    uint8_t dummy[available];
+    USART1_DMA_Read(dummy, available);
+  }
+
+  // Send command
+  USART1_SendString("AT+CIFSR\r\n");
+
+  // Wait for response
+  DWT_Delay_ms(500);
+
+  // Read and display response
+  available = USART1_DMA_GetAvailable();
+  if(available > 0)
+  {
+    uint8_t response[256];
+    USART1_DMA_Read(response, (available < 256) ? available : 256);
+
+    USART2_SendString("Response:\r\n");
+    for(uint16_t i = 0; i < available && i < 256; i++)
+    {
+      USART2_SendChar(response[i]);
+    }
+    USART2_SendString("\r\n");
+  }
+  else
+  {
+    USART2_SendString("No response\r\n");
+  }
+}
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -132,8 +169,12 @@ int main(void)
   LCD_SetCursor(1, 0);
   LCD_SendString("INITIALIZING...");
 
+  // Initialize OTA Handler
+  OTA_Handler_Init();
+
   // Initialize ESP8266
   ESP_Init();
+  ESP8266_Get_IP();
 
   // Initialize W25Q64
   W25Q64_Reset();
@@ -177,38 +218,49 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // Run Tasks at Different Rates
-    // Read DHT11 every 1 seconds
-    if(dht_count++ >= DHT11_READ_TICKS)
+    // ========== NORMAL OPERATION ==========
+    if(!OTA_Is_In_Progress())
     {
-      dht_count = 0;
-      Task_DHT11_Read();
+      // Read DHT11 every 1 second
+      if(dht_count++ >= DHT11_READ_TICKS)
+      {
+        dht_count = 0;
+        Task_DHT11_Read();
+      }
+
+      // Update LCD every 100ms
+      if(lcd_count++ >= LCD_UPDATE_TICKS)
+      {
+        lcd_count = 0;
+        Task_LCD_Update();
+      }
     }
 
-    // Update LCD every 100ms
-    if(lcd_count++ >= LCD_UPDATE_TICKS)
+    // ========== OTA HANDLING ==========
+    OTA_Check_Trigger();      // Check if button was pressed
+
+    if(OTA_Is_In_Progress())
     {
-      lcd_count = 0;
-      Task_LCD_Update();
+      OTA_Process_Task();    // Process OTA download
     }
 
-    TIMER3_WaitPeriod(); // Heart Beat time check
+    TIMER3_WaitPeriod();       // 10ms heartbeat
   }
   /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -216,35 +268,34 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  if(HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if(HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Enables the Clock Security System
-  */
+   */
   HAL_RCC_EnableCSS();
 }
 
 /**
-  * @brief SPI2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI2_Init(void)
 {
 
@@ -268,7 +319,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi2.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  if(HAL_SPI_Init(&hspi2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -279,13 +330,13 @@ static void MX_SPI2_Init(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = { 0 };
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -315,9 +366,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
