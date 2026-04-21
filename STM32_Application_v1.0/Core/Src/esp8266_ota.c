@@ -7,12 +7,9 @@
 
 #include "esp8266_ota.h"
 #include "flash_layout.h"
+#include "flash_operations.h"
 #include "app_ota.h"
-
-#include "w25q64.h"
-#include "usart1.h"
-#include "usart2.h"
-#include "dwt.h"
+#include "W25Q64.h"
 
 #include "string.h"
 #include "stdio.h"
@@ -21,23 +18,24 @@
 /* ================= CONFIG ================= */
 #define ESP_DMA_RX_BUF_SIZE     1024
 #define OTA_RX_BUF_SIZE         512
-#define OTA_ACK_CHUNK           512
-#define OTA_FLASH_OFFSET        0
+#define OTA_ACK_CHUNK     512
+#define OTA_FLASH_OFFSET    0
 
 #define WiFi_ssid               "mynoobu"
 #define WiFi_pssd               "Sarah159!"
-#define SERVER_IP               "10.201.248.65"
+#define SERVER_IP               "10.100.193.65"
 #define SERVER_PORT             5678
 
-/* ================= OTA HEADER ================= */
-#define OTA_HEADER_SIZE         sizeof(ota_image_hdr_t)
-#define APP_MAGIC               0xDEADBEEF
-
-/* ================= GLOBAL VARIABLES ================= */
+/* ================================== */
 ESP8266_ConnectionState ESP_ConnState = ESP8266_DISCONNECTED;
-volatile uint8_t ota_active = 0;
+volatile uint8_t ota_active = 0;   // OTA running flag
 
-char esp_rx_buffer[2048];
+uint8_t esp_dma_rx_buf[ESP_DMA_RX_BUF_SIZE];
+volatile uint16_t esp_dma_rx_head = 0;
+
+char esp_rx_buffer[2048];          // AT command buffer
+
+#define OTA_HEADER_SIZE         sizeof(ota_image_hdr_t)
 
 /* ================= OTA STATE ================= */
 typedef enum
@@ -56,87 +54,37 @@ static uint32_t flash_offset = OTA_FLASH_OFFSET;
 static uint32_t bytes_received = 0;
 static uint8_t header_received = 0;
 static uint8_t flash_erased = 0;
+static uint32_t actually_written = 0;
 static uint8_t in_ipd_payload = 0;
 static uint32_t ipd_remaining = 0;
 static uint32_t last_progress_tick = 0;
 static uint32_t last_bytes_received = 0;
 static uint32_t bytes_in_chunk = 0;
 
+static void ota_finalize(void);
+static void ota_error(void);
+
 static ota_image_hdr_t ota_hdr;
 
 /* ================= DMA HELPERS ================= */
-static uint16_t ESP_DMA_GetAvailable(void)
+uint16_t ESP_DMA_GetWritePos(void)
 {
-  return USART1_DMA_GetAvailable();
-}
-
-static uint16_t ESP_DMA_Read(uint8_t *buf, uint16_t maxlen)
-{
-  return USART1_DMA_Read(buf, maxlen);
+  return ESP_DMA_RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(ESP_UART.hdmarx);
 }
 
 void ESP_DMA_Flush(void)
 {
-  uint16_t available = ESP_DMA_GetAvailable();
-  if(available > 0)
-  {
-    uint8_t dummy[available];
-    USART1_DMA_Read(dummy, available);
-  }
+  esp_dma_rx_head = ESP_DMA_GetWritePos();
   memset(esp_rx_buffer, 0, sizeof(esp_rx_buffer));
-}
-
-/* ================= SEND COMMAND ================= */
-ESP8266_Status ESP_SendCommand(char *cmd, const char *ack, uint32_t timeout)
-{
-  uint32_t tickstart = DWT_GetTick();
-  ESP_DMA_Flush();
-
-  if(cmd && *cmd)
-  {
-    USART2_SendString("[CMD] ");
-    USART2_SendString(cmd);
-    USART1_SendString(cmd);
-  }
-
-  while((DWT_GetTick() - tickstart) < timeout)
-  {
-    uint16_t available = ESP_DMA_GetAvailable();
-    if(available > 0)
-    {
-      uint16_t read = ESP_DMA_Read(
-          (uint8_t*) esp_rx_buffer + strlen(esp_rx_buffer),
-          (available < 256) ? available : 256);
-
-      size_t len = strlen(esp_rx_buffer);
-      if(len < sizeof(esp_rx_buffer) - 1)
-      {
-        esp_rx_buffer[len] = '\0';
-      }
-
-      if(ack && strstr(esp_rx_buffer, ack))
-      {
-        USART2_SendString("[OK] ");
-        USART2_SendString((char*) ack);
-        USART2_SendString("\r\n");
-        return ESP8266_OK;
-      }
-    }
-    DWT_Delay_ms(10);
-  }
-
-  USART2_SendString("[ERR] Timeout: ");
-  USART2_SendString((char*) ack);
-  USART2_SendString("\r\n");
-  return ESP8266_TIMEOUT;
 }
 
 /* ================= ESP INIT ================= */
 ESP8266_Status ESP_Init(void)
 {
-  USART2_SendString("ESP Init...\r\n");
-  DWT_Delay_ms(1000);
+  USER_LOG("Initializing ESP8266...");
+  HAL_Delay(1000);
 
+  HAL_UART_Receive_DMA(&ESP_UART, esp_dma_rx_buf, ESP_DMA_RX_BUF_SIZE);
   ESP_DMA_Flush();
 
   if(ESP_SendCommand("AT\r\n", "OK", 2000) != ESP8266_OK)
@@ -145,27 +93,74 @@ ESP8266_Status ESP_Init(void)
   if(ESP_SendCommand("ATE0\r\n", "OK", 2000) != ESP8266_OK)
     return ESP8266_ERROR;
 
-  USART2_SendString("ESP OK\r\n");
+  USER_LOG("ESP8266 Initialized Successfully...");
   return ESP8266_OK;
+}
+
+/* ================= SEND COMMAND ================= */
+ESP8266_Status ESP_SendCommand(char *cmd, const char *ack, uint32_t timeout)
+{
+  uint32_t tickstart = HAL_GetTick();
+  ESP_DMA_Flush();
+
+  if(cmd && *cmd)
+  {
+    DEBUG_LOG("Sending: %s", cmd);
+    HAL_UART_Transmit(&ESP_UART, (uint8_t*) cmd, strlen(cmd), HAL_MAX_DELAY);
+  }
+
+  while((HAL_GetTick() - tickstart) < timeout)
+  {
+    uint16_t head = ESP_DMA_GetWritePos();
+    while(esp_dma_rx_head != head)
+    {
+      char c = esp_dma_rx_buf[esp_dma_rx_head++];
+      if(esp_dma_rx_head >= ESP_DMA_RX_BUF_SIZE)
+        esp_dma_rx_head = 0;
+
+      size_t len = strlen(esp_rx_buffer);
+      if(len < sizeof(esp_rx_buffer) - 1)
+      {
+        esp_rx_buffer[len] = c;
+        esp_rx_buffer[len + 1] = '\0';
+      }
+
+      if(ack && strstr(esp_rx_buffer, ack))
+      {
+        DEBUG_LOG("Matched ACK: %s", ack);
+        return ESP8266_OK;
+      }
+    }
+  }
+
+  DEBUG_LOG("Timeout. Buffer: %s", esp_rx_buffer);
+  return ESP8266_TIMEOUT;
 }
 
 /* ================= WIFI + IP ================= */
 static ESP8266_Status ESP_GetIP(char *ip_buffer, uint16_t buffer_len)
 {
+  USER_LOG("Fetching IP Address...");
+
   for(int attempt = 1; attempt <= 3; attempt++)
   {
-    ESP_DMA_Flush();
+    ESP_DMA_Flush();  // clear old data
 
+    // Send CIFSR command
     ESP8266_Status result = ESP_SendCommand("AT+CIFSR\r\n", "OK", 5000);
     if(result != ESP8266_OK)
+    {
+      DEBUG_LOG("CIFSR failed on attempt %d", attempt);
       continue;
+    }
 
+    // Now esp_rx_buffer should contain +CIFSR output
     char *search = esp_rx_buffer;
     char *last_ip = NULL;
 
     while((search = strstr(search, "STAIP,\"")) != NULL)
     {
-      search += 7;
+      search += 7; // move past STAIP,"
       char *end = strchr(search, '"');
       if(end && ((end - search) < buffer_len))
       {
@@ -174,25 +169,29 @@ static ESP8266_Status ESP_GetIP(char *ip_buffer, uint16_t buffer_len)
         strncpy(ip_buffer, search, len);
         ip_buffer[len] = '\0';
       }
-      search++;
+      search++; // keep scanning
     }
 
     if(last_ip)
     {
       if(strcmp(ip_buffer, "0.0.0.0") == 0)
       {
+        DEBUG_LOG("Attempt %d: IP not ready yet (0.0.0.0). Retrying...", attempt);
         ESP_ConnState = ESP8266_CONNECTED_NO_IP;
-        DWT_Delay_ms(1000);
+        HAL_Delay(1000);
         continue;
       }
 
+      USER_LOG("Got IP: %s", ip_buffer);
       ESP_ConnState = ESP8266_CONNECTED_IP;
       return ESP8266_OK;
     }
 
-    DWT_Delay_ms(500);
+    DEBUG_LOG("Attempt %d: Failed to parse STAIP.", attempt);
+    HAL_Delay(500);
   }
 
+  USER_LOG("Failed to fetch IP after retries.");
   ESP_ConnState = ESP8266_CONNECTED_NO_IP;
   return ESP8266_ERROR;
 }
@@ -205,118 +204,109 @@ ESP8266_Status ESP_ConnectWiFi(const char *ssid, const char *password, char *ip_
 
   snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
 
-  if(ESP_SendCommand(cmd, "WIFI CONNECTED", 15000) != ESP8266_OK)
+  if(ESP_SendCommand(cmd, "WIFI CONNECTED", 10000) != ESP8266_OK)
     return ESP8266_ERROR;
 
   return ESP_GetIP(ip_buffer, buffer_len);
 }
 
-ESP8266_ConnectionState ESP_GetConnectionState(void)
-{
-  return ESP_ConnState;
-}
-
-/* ================= OTA FLASH HELPERS ================= */
+/* ================= OTA HELPERS ================= */
 static void erase_ota_flash(void)
 {
-  USART2_SendString("Erasing W25Q64...\r\n");
-  W25Q64_Erase(OTA_FLASH_OFFSET, 1024 * 1024);
-  USART2_SendString("Flash erased\r\n");
+  W25Q_Erase(OTA_FLASH_OFFSET, APP_MAX_SIZE);
 }
 
 static uint8_t ota_write(uint32_t addr, uint8_t *buf, size_t len)
 {
-  uint8_t verify_buf[512];
+  uint8_t rBuf[512];
 
   if(len == 0)
-    return 1;
+    return 1;  // success (nothing to do)
 
-  // Pre-check: verify area is erased
-  W25Q64_FastRead(addr, verify_buf, len);
+  // Quick pre-check: make sure area is erased
+  W25Q_FastRead(addr, rBuf, len);
   for(size_t i = 0; i < len; i++)
   {
-    if(verify_buf[i] != 0xFF)
+    if(rBuf[i] != 0xFF)
     {
-      USART2_SendString("ERROR: Flash not erased!\r\n");
-      return 0;
+      USER_LOG("ERROR: addr 0x%08lX not erased before write!", addr);
+      USER_LOG("Check W25Q_Erase() Function \n\n");
+      ota_error();
+      return -1;
     }
   }
 
-  // Write to flash
-  W25Q64_Write(addr, buf, len);
-  DWT_Delay_ms(1);
+  W25Q_Write(addr, buf, len);
 
-  // Verify write
-  W25Q64_FastRead(addr, verify_buf, len);
-  if(memcmp(buf, verify_buf, len) != 0)
+  // Small delay if needed (some flashes need time after write)
+  HAL_Delay(1);
+
+  /****************** Verify the data written ************************/
+  W25Q_FastRead(addr, rBuf, len);
+
+  int cmp = memcmp(buf, rBuf, len);
+  if(cmp != 0)
   {
-    USART2_SendString("ERROR: Write verify failed!\r\n");
-    return 0;
+    USER_LOG("!!! FLASH WRITE VERIFY FAILED at addr=0x%08lX, len=%u !!!\n", addr, (unsigned) len);
+
+    // Find first mismatch
+    for(size_t k = 0; k < len; k++)
+    {
+      if(buf[k] != rBuf[k])
+      {
+        USER_LOG("First mismatch at offset %u: wrote 0x%02X, read 0x%02X\n", (unsigned) k, buf[k], rBuf[k]);
+        break;
+      }
+    }
+
+    ota_error();
+    return -2;  // failed
   }
 
-  return 1;
+  return 0;  // success
 }
 
-/* ================= OTA PULL DATA ================= */
-static int ota_pull_data(uint8_t *buf, uint16_t maxlen)
-{
-  uint16_t available = USART1_DMA_GetAvailable();
-
-  // Debug: Print available bytes
-  if(available > 0)
-  {
-    USART2_SendString("DMA available: ");
-    USART2_SendNumber(available);
-    USART2_SendString("\r\n");
-  }
-
-  if(available == 0)
-    return 0;
-
-  uint16_t to_read = (available < maxlen) ? available : maxlen;
-  uint16_t read = USART1_DMA_Read(buf, to_read);
-
-  USART2_SendString("Read ");
-  USART2_SendNumber(read);
-  USART2_SendString(" bytes from DMA\r\n");
-
-  return read;
-}
-
-/* ================= OTA PROCESS RX ================= */
 static void ota_process_rx(uint8_t *data, uint16_t len)
 {
   if(len == 0)
     return;
 
-  USART2_SendString("RX: ");
-  USART2_SendNumber(len);
-  USART2_SendString(" bytes\r\n");
+  DEBUG_LOG("RX: %u bytes", len);
 
   uint16_t i = 0;
 
   while(i < len)
   {
+
+    // ───────────────────────────────────────────────
     // Not in payload → look for +IPD or close messages
+    // ───────────────────────────────────────────────
     if(!in_ipd_payload)
     {
-      // Check for connection closed
+      // Check for connection closed (common ESP8266 unsolicited)
       if(len - i >= 6)
       {
         if(memcmp(&data[i], "CLOSED", 6) == 0 || memcmp(&data[i], "0,CLOSED", 8) == 0
             || memcmp(&data[i], "ERROR", 5) == 0)
         {
-          USART2_SendString("Connection closed by server\r\n");
+          USER_LOG(
+              "Connection closed by server. Received %lu / %lu expected",
+              bytes_received,
+              ota_hdr.image_size + OTA_HEADER_SIZE);
 
           if(bytes_received == 0)
           {
-            ota_state = OTA_ERROR;
+            ota_error();
           }
           if(bytes_received + 512 >= ota_hdr.image_size + OTA_HEADER_SIZE)
           {
-            USART2_SendString("Finalizing OTA\r\n");
-            ota_state = OTA_COMPLETED;
-            ota_active = 0;
+            USER_LOG("Size close enough → finalizing OTA\n");
+            ota_finalize();
+          }
+          else
+          {
+            USER_LOG("Incomplete transfer - aborting\n");
+            // optional: ota_state = OTA_ERROR;
           }
           return;
         }
@@ -327,7 +317,7 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
       {
         i += 5;
 
-        // Skip optional link ID
+        // Skip optional link ID (single digit + comma)
         if(i < len && data[i] >= '0' && data[i] <= '4' && i + 1 < len && data[i + 1] == ',')
         {
           i += 2;
@@ -335,31 +325,33 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
 
         // Parse length
         ipd_remaining = 0;
+        uint8_t digits = 0;
         while(i < len && data[i] >= '0' && data[i] <= '9')
         {
           ipd_remaining = ipd_remaining * 10 + (data[i] - '0');
           i++;
+          digits++;
         }
 
-        if(i >= len || data[i] != ':')
+        if(digits == 0 || i >= len || data[i] != ':')
         {
-          USART2_SendString("Malformed +IPD\r\n");
+          USER_LOG("Malformed +IPD - skipping byte");
           i++;
           continue;
         }
 
         i++;  // skip ':'
         in_ipd_payload = 1;
-        USART2_SendString("+IPD len=");
-        USART2_SendNumber(ipd_remaining);
-        USART2_SendString("\r\n");
+
+        DEBUG_LOG("Got +IPD len=%lu, payload starts at i=%u", ipd_remaining, i);
       }
       else
       {
+        // Junk byte - discard
         i++;
       }
     }
-    else  // in payload
+    else  // ────────────────────────────────────────── in payload
     {
       uint16_t can_take = len - i;
       if(can_take > ipd_remaining)
@@ -371,6 +363,7 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
         continue;
       }
 
+      // ───────────── OTA WRITE LOGIC ────────────────
       if(!flash_erased)
       {
         erase_ota_flash();
@@ -379,7 +372,6 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
 
       uint32_t prev_received = bytes_received;
       uint32_t offset = 0;
-
       if(!header_received)
       {
         uint32_t need = OTA_HEADER_SIZE - bytes_received;
@@ -392,36 +384,44 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
           offset += need;
           bytes_received += need;
           flash_offset += need;
+          actually_written = bytes_received - prev_received;
 
           if(bytes_received >= OTA_HEADER_SIZE)
           {
             header_received = 1;
             if(ota_hdr.magic != APP_MAGIC)
             {
-              USART2_SendString("ERROR: Invalid magic!\r\n");
-              ota_state = OTA_ERROR;
-              return;
+              USER_LOG("Invalid Header Received: magic=0x%08lX", ota_hdr.magic);
+              USER_LOG("Aborting OTA...\n\n");
+              ota_error();
             }
-            USART2_SendString("Header OK - Size: ");
-            USART2_SendNumber(ota_hdr.image_size);
-            USART2_SendString(" bytes, Version: ");
-            USART2_SendNumber(ota_hdr.version);
-            USART2_SendString("\r\n");
+            else
+            {
+              USER_LOG(
+                  "Header complete: magic=0x%08lX size=%lu version=%lu",
+                  ota_hdr.magic,
+                  ota_hdr.image_size,
+                  ota_hdr.version);
+            }
+
           }
         }
+
         else
         {
           memcpy(((uint8_t*) &ota_hdr) + bytes_received, &data[i], can_take);
+
+          /* WRITE PARTIAL HEADER TO FLASH */
           ota_write(flash_offset, &data[i], can_take);
           flash_offset += can_take;
           bytes_received += can_take;
-          bytes_in_chunk += can_take;
-          USART2_SendString("Partial header, bytes_received: ");
-          USART2_SendNumber(bytes_received);
-          USART2_SendString("\r\n");
+          actually_written = bytes_received - prev_received;
+          bytes_in_chunk += actually_written;
+          USER_LOG("bytes_received so far = %lu, Actually Written = %lu", bytes_received, actually_written);
           ipd_remaining -= can_take;
           return;
         }
+
       }
 
       uint32_t fw_bytes_received = bytes_received - OTA_HEADER_SIZE;
@@ -437,36 +437,30 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
         bytes_received += fw_bytes_to_write;
       }
 
-      bytes_in_chunk += (bytes_received - prev_received);
-
-      USART2_SendString("bytes_received: ");
-      USART2_SendNumber(bytes_received);
-      USART2_SendString(", bytes_in_chunk: ");
-      USART2_SendNumber(bytes_in_chunk);
-      USART2_SendString("\r\n");
-
-      // Send ACK when threshold reached
+      actually_written = bytes_received - prev_received;
+      bytes_in_chunk += actually_written;
+      USER_LOG("bytes_received so far = %lu, Actually Written = %lu", bytes_received, actually_written);
+      // Ack when threshold reached
       if(bytes_in_chunk >= OTA_ACK_CHUNK)
       {
-        USART2_SendString("[ACK] Sending ACK...\r\n");
+        DEBUG_LOG("Sending ack (chunk bytes >= %d, total rx=%lu)", OTA_ACK_CHUNK, bytes_received);
 
-        if(ESP_SendCommand("AT+CIPSEND=1\r\n", ">", 1500) == ESP8266_OK)
+        ESP8266_Status s1 = ESP_SendCommand("AT+CIPSEND=1\r\n", ">", 1500);
+        if(s1 == ESP8266_OK)
         {
-          USART2_SendString("[ACK] Got '>', sending 'A'\r\n");
-          USART1_SendString("A");
-
-          if(ESP_SendCommand("", "SEND OK", 2500) == ESP8266_OK)
+          ESP8266_Status s2 = ESP_SendCommand("A", "SEND OK", 2500);
+          if(s2 == ESP8266_OK)
           {
-            USART2_SendString("[ACK] ACK sent successfully!\r\n");
+            USER_LOG("Ack sent successfully\n\n");
           }
           else
           {
-            USART2_SendString("[ACK] SEND OK timeout\r\n");
+            USER_LOG("Ack send failed!");
           }
         }
         else
         {
-          USART2_SendString("[ACK] CIPSEND timeout\r\n");
+          DEBUG_LOG("CIPSEND command failed!");
         }
 
         bytes_in_chunk = 0;
@@ -475,11 +469,8 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
       // Final check
       if(bytes_received >= ota_hdr.image_size + OTA_HEADER_SIZE)
       {
-        USART2_SendString("OTA Complete! Received: ");
-        USART2_SendNumber(bytes_received);
-        USART2_SendString(" bytes\r\n");
-        ota_state = OTA_COMPLETED;
-        ota_active = 0;
+        USER_LOG("Full OTA received (%lu bytes) → finalizing", bytes_received);
+        ota_finalize();
         return;
       }
 
@@ -493,41 +484,67 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
     }
   }
 
+  // Update stall timer only if we actually processed something
   if(bytes_received > last_bytes_received)
   {
-    last_progress_tick = DWT_GetTick();
+    last_progress_tick = HAL_GetTick();
     last_bytes_received = bytes_received;
   }
+}
+
+/* ================= OTA PULL ================= */
+int ota_pull_data(uint8_t *buf, uint16_t maxlen)
+{
+  uint16_t len = 0;
+
+  // Parse +IPD from DMA buffer
+  for(;;)
+  {
+    uint16_t head = ESP_DMA_GetWritePos();
+    if(esp_dma_rx_head == head)
+      break;
+
+    char c = esp_dma_rx_buf[esp_dma_rx_head++];
+    if(esp_dma_rx_head >= ESP_DMA_RX_BUF_SIZE)
+      esp_dma_rx_head = 0;
+
+    // Copy to buf
+    if(len < maxlen)
+      buf[len++] = c;
+
+    // Stop on first +IPD chunk complete
+    if(len >= maxlen)
+      break;
+  }
+
+  if(len > 0)
+    DEBUG_LOG("Pulled %d bytes from DMA", len);
+  return len;
 }
 
 /* ================= OTA TASK ================= */
 void ESP8266_OTA_Task(void)
 {
-  static uint32_t last_debug = 0;
-
   if(!ota_active)
     return;
-
-  // Periodic debug every 2 seconds
-  if((DWT_GetTick() - last_debug) > 2000)
-  {
-    last_debug = DWT_GetTick();
-    USART2_SendString("OTA Task - Checking for data...\r\n");
-    ESP_SendCommand("AT+CIPRECVDATA?\r\n", "OK", 1000);
-  }
 
   int len = ota_pull_data(ota_rx_buf, OTA_RX_BUF_SIZE);
   if(len > 0)
     ota_process_rx(ota_rx_buf, len);
 
-  uint32_t now = DWT_GetTick();
+  // ───────────────────────────────────────────────
+  // Stall / no-progress timeout detection
+  // ───────────────────────────────────────────────
+  uint32_t now = HAL_GetTick();
   if(ota_active && (now - last_progress_tick > 8000))
-  {
-    if(bytes_received == last_bytes_received && bytes_received > 0)
+  {  // 8 seconds no change&& (last_bytes_received>0)
+    if(bytes_received == last_bytes_received)
     {
-      USART2_SendString("ERROR: OTA stalled!\r\n");
-      ota_state = OTA_ERROR;
-      ota_active = 0;
+      USER_LOG(
+          "OTA stalled - no progress for 8s. Received %lu / %lu expected",
+          bytes_received,
+          ota_hdr.image_size + OTA_HEADER_SIZE);
+      ota_error();  // set error state
       return;
     }
     last_bytes_received = bytes_received;
@@ -539,218 +556,83 @@ void ESP8266_OTA_Task(void)
 void ota_start(void)
 {
   char ip[16];
-  char cmd[128];
 
-  USART2_SendString("\r\n========== OTA START ==========\r\n");
-
-  // Initialize W25Q64
-  W25Q64_Reset();
-  uint32_t id = W25Q64_ReadID();
-  USART2_SendString("W25Q64 ID: 0x");
-  USART2_SendHex((id >> 16) & 0xFF);
-  USART2_SendHex((id >> 8) & 0xFF);
-  USART2_SendHex(id & 0xFF);
-  USART2_SendString("\r\n");
-
-  if(id != 0xEF4017)
-  {
-    USART2_SendString("ERROR: W25Q64 not detected!\r\n");
-    return;
-  }
-
-  // Initialize ESP8266
   if(ESP_Init() != ESP8266_OK)
     return;
 
-  // Connect to WiFi
-  USART2_SendString("Connecting to WiFi...\r\n");
+  char cmd[128];
+  USER_LOG("Connecting to Wifi..");
   if(ESP_ConnectWiFi(WiFi_ssid, WiFi_pssd, ip, sizeof(ip)) != ESP8266_OK)
     return;
 
-  USART2_SendString("WiFi Connected! IP: ");
-  USART2_SendString(ip);
-  USART2_SendString("\r\n");
+  // wait to obtain the IP address
+  USER_LOG("Obtaining IP address..");
+  uint32_t tickStart = HAL_GetTick();
+  while((ESP_ConnState != ESP8266_CONNECTED_IP) && ((HAL_GetTick() - tickStart) < 5000));
 
-  // Wait for IP to be ready
-  uint32_t tickStart = DWT_GetTick();
-  while((ESP_ConnState != ESP8266_CONNECTED_IP) && ((DWT_GetTick() - tickStart) < 5000));
-  DWT_Delay_ms(1000);
-
-  // Disable multiple connections
+  // Disable Multiple connections
   if(ESP_SendCommand("AT+CIPMUX=0\r\n", "OK", 2000) != ESP8266_OK)
     return;
 
-  // Connect to TCP server
-  USART2_SendString("Connecting to server...\r\n");
+  // Connect to the Server
+  USER_LOG("Connecting to TCP SERVER");
   snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", SERVER_IP, SERVER_PORT);
-  if(ESP_SendCommand(cmd, "CONNECT", 10000) != ESP8266_OK)
+
+  if(ESP_SendCommand(cmd, "CONNECT", 5000) != ESP8266_OK)
     return;
 
-  USART2_SendString("Connected to server!\r\n");
+  ota_active = 1;
 
-  // Reset OTA state
+  USER_LOG("Initializing W25Q Flash");
+  W25Q_Reset();
+
   flash_offset = OTA_FLASH_OFFSET;
   bytes_received = 0;
   header_received = 0;
   flash_erased = 0;
+  actually_written = 0;
   in_ipd_payload = 0;
   ipd_remaining = 0;
-  bytes_in_chunk = 0;
-  last_progress_tick = DWT_GetTick();
+  last_progress_tick = 0;
   last_bytes_received = 0;
+  bytes_in_chunk = 0;
+
+  // Request server to start sending data
+  USER_LOG("Starting Reception..");
+  const char req[] = "GET firmware\r\n";
+  snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", strlen(req));
+  if(ESP_SendCommand(cmd, ">", 2000) != ESP8266_OK)
+  {
+    ota_state = OTA_ERROR;
+    return;
+  }
+
+  if(ESP_SendCommand((char*) req, "SEND OK", 2000) != ESP8266_OK)
+  {
+    ota_state = OTA_ERROR;
+    return;
+  }
+
   ota_state = OTA_RECEIVING;
-  ota_active = 1;
 
-  // Request firmware from server
-  USART2_SendString("Requesting firmware...\r\n");
-  const char req[] = "START\n";
-  snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", strlen(req));
-
-  if(ESP_SendCommand(cmd, ">", 2000) != ESP8266_OK)
-  {
-    USART2_SendString("ERROR: CIPSEND failed!\r\n");
-    ota_state = OTA_ERROR;
-    ota_active = 0;
-    return;
-  }
-
-  if(ESP_SendCommand((char*) req, "SEND OK", 5000) != ESP8266_OK)
-  {
-    USART2_SendString("ERROR: Send failed!\r\n");
-    ota_state = OTA_ERROR;
-    ota_active = 0;
-    return;
-  }
-
-  USART2_SendString("Receiving firmware...\r\n");
-
-  // Debug: Check connection status
-  USART2_SendString("Checking connection status...\r\n");
-  ESP_SendCommand("AT+CIPSTATUS\r\n", "OK", 2000);
-
-  last_progress_tick = DWT_GetTick();
+  last_progress_tick = HAL_GetTick();
 }
 
-/* ================= OTA STATUS ================= */
-uint8_t ESP8266_OTA_IsComplete(void)
+/* ================= OTA FINALIZE ================= */
+static void ota_finalize(void)
 {
-  return (ota_state == OTA_COMPLETED);
-}
-
-uint8_t ESP8266_OTA_HasError(void)
-{
-  return (ota_state == OTA_ERROR);
-}
-
-/* ================= TEST FUNCTION ================= */
-void ESP8266_Test_Receive(void)
-{
-  char ip[16];
-  char cmd[128];
-
-  USART2_SendString("\r\n========== TEST RECEIVE MODE ==========\r\n");
-
-  // Initialize ESP8266
-  if(ESP_Init() != ESP8266_OK)
-  {
-    USART2_SendString("ESP8266 init failed!\r\n");
-    return;
-  }
-
-  // Connect to WiFi
-  USART2_SendString("Connecting to WiFi...\r\n");
-  if(ESP_ConnectWiFi(WiFi_ssid, WiFi_pssd, ip, sizeof(ip)) != ESP8266_OK)
-  {
-    USART2_SendString("WiFi connection failed!\r\n");
-    return;
-  }
-
-  USART2_SendString("WiFi Connected! IP: ");
-  USART2_SendString(ip);
-  USART2_SendString("\r\n");
-
-  // Connect to server
-  USART2_SendString("Connecting to server...\r\n");
-  snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", SERVER_IP, SERVER_PORT);
-  if(ESP_SendCommand(cmd, "CONNECT", 10000) != ESP8266_OK)
-  {
-    USART2_SendString("Server connection failed!\r\n");
-    return;
-  }
-
-  USART2_SendString("Connected to server!\r\n");
-
-  // Send START command
-  USART2_SendString("Sending START...\r\n");
-  const char req[] = "START\n";
-  snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", strlen(req));
-
-  if(ESP_SendCommand(cmd, ">", 2000) != ESP8266_OK)
-  {
-    USART2_SendString("CIPSEND failed!\r\n");
-    return;
-  }
-
-  if(ESP_SendCommand((char*) req, "SEND OK", 5000) != ESP8266_OK)
-  {
-    USART2_SendString("Send failed!\r\n");
-    return;
-  }
-
-  USART2_SendString("START sent. Waiting for test messages...\r\n");
-  USART2_SendString("========================================\r\n");
-
-  // Read and display all incoming data for 15 seconds
-  uint32_t start = DWT_GetTick();
-  uint32_t timeout = 15000; // 15 seconds
-  uint8_t buffer[512];
-
-  while((DWT_GetTick() - start) < timeout)
-  {
-    uint16_t available = USART1_DMA_GetAvailable();
-    if(available > 0)
-    {
-      uint16_t read = USART1_DMA_Read(buffer, (available < 512) ? available : 512);
-
-      USART2_SendString(">>> ");
-      for(uint16_t i = 0; i < read; i++)
-      {
-        // Print printable characters
-        if(buffer[i] >= 32 && buffer[i] <= 126)
-        {
-          USART2_SendChar(buffer[i]);
-        }
-        // Print newline as visible
-        else if(buffer[i] == '\n')
-        {
-          USART2_SendString("[LF]");
-        }
-        else if(buffer[i] == '\r')
-        {
-          USART2_SendString("[CR]");
-        }
-        else
-        {
-          // Print hex for non-printable
-          USART2_SendString("[");
-          USART2_SendHex(buffer[i]);
-          USART2_SendString("]");
-        }
-      }
-      USART2_SendString("\r\n");
-    }
-    DWT_Delay_ms(100);
-
-    // Show heartbeat every 2 seconds
-    if(((DWT_GetTick() - start) % 2000) < 100)
-    {
-      USART2_SendString(".");
-    }
-  }
-
-  USART2_SendString("\r\n========================================\r\n");
-  USART2_SendString("Test complete!\r\n");
-
-  // Close connection
+  USER_LOG("OTA Written Succesfull, Data verified. Rebooting Now..\n\n");
   ESP_SendCommand("AT+CIPCLOSE\r\n", "OK", 2000);
+  ota_active = 0;
+  ota_state = OTA_COMPLETED;
+  enable_ota_request();
+}
+
+static void ota_error(void)
+{
+  USER_LOG("OTA Failed.. Try again");
+  ESP_SendCommand("AT+CIPCLOSE\r\n", "OK", 2000);
+  ota_active = 0;
+  ota_state = OTA_ERROR;
+  printf("Application will resume\n");
 }

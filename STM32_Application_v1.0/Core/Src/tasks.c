@@ -9,7 +9,6 @@
 #include "dht11.h"
 #include "dwt.h"
 #include "lcd.h"
-#include "usart1.h"
 #include "ds3231.h"
 #include "button.h"
 #include "timer2.h"

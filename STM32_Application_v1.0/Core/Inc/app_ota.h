@@ -8,7 +8,7 @@
 #ifndef INC_APP_OTA_H_
 #define INC_APP_OTA_H_
 
-#define APP_MAGIC 0xDEADBEEF
+#define APP_MAGIC 0xABCDEFAB
 
 typedef struct
 {

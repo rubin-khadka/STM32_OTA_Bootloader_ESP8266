@@ -27,7 +27,6 @@
 #include "esp8266_ota.h"
 #include "w25q64.h"
 #include "app_header.h"
-#include "ota_handler.h"
 
 #include "dwt.h"
 #include "timer2.h"
@@ -36,7 +35,6 @@
 #include "spi2.h"
 
 #include "lcd.h"
-#include "usart1.h"
 #include "usart2.h"
 
 #include "button.h"
@@ -91,49 +89,22 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void ESP8266_Get_IP(void)
+
+extern volatile uint8_t ota_active;
+extern uint8_t ota_begin;
+
+int __io_putchar(int ch)
 {
-  USART2_SendString("\r\n=== Get ESP8266 IP ===\r\n");
-
-  // Flush any pending data
-  uint16_t available = USART1_DMA_GetAvailable();
-  if(available > 0)
-  {
-    uint8_t dummy[available];
-    USART1_DMA_Read(dummy, available);
-  }
-
-  // Send command
-  USART1_SendString("AT+CIFSR\r\n");
-
-  // Wait for response
-  DWT_Delay_ms(500);
-
-  // Read and display response
-  available = USART1_DMA_GetAvailable();
-  if(available > 0)
-  {
-    uint8_t response[256];
-    USART1_DMA_Read(response, (available < 256) ? available : 256);
-
-    USART2_SendString("Response:\r\n");
-    for(uint16_t i = 0; i < available && i < 256; i++)
-    {
-      USART2_SendChar(response[i]);
-    }
-    USART2_SendString("\r\n");
-  }
-  else
-  {
-    USART2_SendString("No response\r\n");
-  }
+  HAL_UART_Transmit(&huart2, (uint8_t*) &ch, 1, 10);
+  return ch;
 }
+
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -169,7 +140,6 @@ int main(void)
   DWT_Init();
   TIMER2_Init();
   TIMER4_Init();
-  USART1_Init();
   USART2_Init();
   I2C2_Init();
   LCD_Init();
@@ -180,21 +150,13 @@ int main(void)
   LCD_SetCursor(1, 0);
   LCD_SendString("INITIALIZING...");
 
-  // Initialize OTA Handler
-  OTA_Handler_Init();
-
-  // Initialize ESP8266
-  ESP_Init();
-  ESP8266_Get_IP();
-
-  ESP8266_Test_Receive();
   // Initialize W25Q64
-  W25Q64_Reset();
-  uint32_t flash_id = W25Q64_ReadID();
+  W25Q_Reset();
+  uint32_t flash_id = W25Q_ReadID();
 
   // Read current app version from header
   app_header_t *header = (app_header_t*) APP_HEADER_ADDR;
-  int version = (header->magic == 0xDEADBEEF) ? header->version : 0;
+  int version = (header->magic == 0xABCDEFAB) ? header->version : 0;
 
   // Welcome Message
   USART2_SendString("\r\n====================================\r\n");
@@ -231,26 +193,31 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    // Only run normal tasks if OTA is NOT in progress
-    if(!OTA_Is_In_Progress())
+    if(ota_begin == 1)
     {
-      // Read DHT11 every 1 seconds
-      if(dht_count++ >= DHT11_READ_TICKS)
-      {
-        dht_count = 0;
-        Task_DHT11_Read();
-      }
-
-      // Update LCD every 100ms
-      if(lcd_count++ >= LCD_UPDATE_TICKS)
-      {
-        lcd_count = 0;
-        Task_LCD_Update();
-      }
+      ota_begin = 0;
+      ota_start();
     }
 
-    // Check OTA trigger - this will block during OTA
-    OTA_Check_Trigger();
+    while(ota_active == 1)
+    {
+      ESP8266_OTA_Task();
+      HAL_Delay(1);
+    }
+
+    // Read DHT11 every 1 seconds
+    if(dht_count++ >= DHT11_READ_TICKS)
+    {
+      dht_count = 0;
+      Task_DHT11_Read();
+    }
+
+    // Update LCD every 100ms
+    if(lcd_count++ >= LCD_UPDATE_TICKS)
+    {
+      lcd_count = 0;
+      Task_LCD_Update();
+    }
 
     TIMER3_WaitPeriod(); // 10ms heartbeat
   }
@@ -258,17 +225,17 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -276,35 +243,34 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  if(HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if(HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Enables the Clock Security System
-  */
+   */
   HAL_RCC_EnableCSS();
 }
 
 /**
-  * @brief SPI2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI2_Init(void)
 {
 
@@ -328,7 +294,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi2.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  if(HAL_SPI_Init(&hspi2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -339,10 +305,10 @@ static void MX_SPI2_Init(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART1_UART_Init(void)
 {
 
@@ -361,7 +327,7 @@ static void MX_USART1_UART_Init(void)
   huart1.Init.Mode = UART_MODE_TX_RX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+  if(HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -372,10 +338,10 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART2_UART_Init(void)
 {
 
@@ -394,7 +360,7 @@ static void MX_USART2_UART_Init(void)
   huart2.Init.Mode = UART_MODE_TX_RX;
   huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
+  if(HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -405,8 +371,8 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
-  * Enable DMA controller clock
-  */
+ * Enable DMA controller clock
+ */
 static void MX_DMA_Init(void)
 {
 
@@ -421,13 +387,13 @@ static void MX_DMA_Init(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = { 0 };
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -457,9 +423,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
