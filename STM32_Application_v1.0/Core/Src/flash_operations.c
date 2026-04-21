@@ -21,9 +21,9 @@ uint32_t flash_erase_app(void)
   FLASH_EraseInitTypeDef erase;
   uint32_t error;
 
-  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.TypeErase   = FLASH_TYPEERASE_PAGES;
   erase.PageAddress = APP_START_ADDR;
-  erase.NbPages = APP_MAX_SIZE / 1024;
+  erase.NbPages     = APP_MAX_SIZE / 1024;
 
   HAL_FLASHEx_Erase(&erase, &error);
   return error;
@@ -47,9 +47,9 @@ uint32_t flash_erase_header(void)
   FLASH_EraseInitTypeDef erase;
   uint32_t error;
 
-  erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.PageAddress = APP_HEADER_ADDR;
-  erase.NbPages = 1;
+  erase.TypeErase     = FLASH_TYPEERASE_PAGES;
+  erase.PageAddress   = APP_HEADER_ADDR;
+  erase.NbPages       = 1;
 
   HAL_FLASHEx_Erase(&erase, &error);
   return error;
@@ -93,4 +93,3 @@ void flash_write_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
     flash_write_word(aligned_addr, temp_word);
   }
 }
-

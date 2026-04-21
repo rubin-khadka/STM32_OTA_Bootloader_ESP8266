@@ -60,11 +60,11 @@ void bl_flash_write_app_header(uint32_t magic, uint32_t size, uint32_t crc, uint
 {
   app_header_t hdr;
 
-  hdr.ota_flag = 0;  // clear OTA FLAG
-  hdr.magic = APP_MAGIC;
-  hdr.size = size;
-  hdr.crc = crc;
-  hdr.version = version;
+  hdr.ota_flag  = 0;  // clear OTA FLAG
+  hdr.magic     = APP_MAGIC;
+  hdr.size      = size;
+  hdr.crc       = crc;
+  hdr.version   = version;
 
   HAL_FLASH_Unlock();
   /* Erase header page ONLY */
@@ -85,10 +85,10 @@ void bl_flash_write_app_header(uint32_t magic, uint32_t size, uint32_t crc, uint
 void bl_ota_begin(bl_ota_ctx_t *ctx, uint32_t image_size, uint32_t expected_crc)
 {
   bl_flash_erase_app();
-  ctx->write_addr = APP_START_ADDR;
-  ctx->total_received = 0;
-  ctx->image_size = image_size;
-  ctx->expected_crc = expected_crc;
+  ctx->write_addr       = APP_START_ADDR;
+  ctx->total_received   = 0;
+  ctx->image_size       = image_size;
+  ctx->expected_crc     = expected_crc;
   bl_crc_init(&ctx->running_crc);
 }
 

@@ -6,186 +6,271 @@
  */
 
 #include "main.h"
-#include "W25q64.h"
-#include "spi2.h"
-#include "dwt.h"
+#include "W25Q64.h"
+#include "string.h"
 
-// W25Q64 Commands
-#define W25Q64_CMD_RESET            0x99
-#define W25Q64_CMD_RESET_ENABLE     0x66
-#define W25Q64_CMD_READ_ID          0x9F
-#define W25Q64_CMD_READ_STATUS      0x05
-#define W25Q64_CMD_WRITE_ENABLE     0x06
-#define W25Q64_CMD_WRITE_DISABLE    0x04
-#define W25Q64_CMD_READ_DATA        0x03
-#define W25Q64_CMD_FAST_READ        0x0B
-#define W25Q64_CMD_PAGE_PROGRAM     0x02
-#define W25Q64_CMD_SECTOR_ERASE     0x20
+/* ================= USER CONFIG ================= */
+#define W25Q_PAGE_SIZE     256
+#define W25Q_SECTOR_SIZE  4096
 
-#define W25Q64_PAGE_SIZE    256
-#define W25Q64_SECTOR_SIZE  4096
+#define W25Q_SPI hspi2
 
-static void W25Q64_WaitForReady(void)
+#define chipSizeinmb      32  // 32megabits
+
+extern SPI_HandleTypeDef W25Q_SPI;
+
+void W25Q_Delay(uint32_t time)
 {
-  uint8_t status;
-  do
+  HAL_Delay(time);
+}
+
+void csLOW(void)
+{
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+}
+
+void csHIGH(void)
+{
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
+}
+
+void SPI_Write(uint8_t *data, uint16_t len)
+{
+  while(HAL_SPI_GetState(&W25Q_SPI) != HAL_SPI_STATE_READY)
   {
-    SPI2_CS_LOW();
-    SPI2_Transfer(W25Q64_CMD_READ_STATUS);
-    status = SPI2_Transfer(0xFF);
-    SPI2_CS_HIGH();
-
-    if(status & 0x01)
-      DWT_Delay_ms(1);
+    HAL_Delay(1);
   }
-  while(status & 0x01);
+  HAL_SPI_Transmit(&W25Q_SPI, data, len, 2000);
 }
 
-static void W25Q64_WriteEnable(void)
+void SPI_Read(uint8_t *data, uint16_t len)
 {
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_WRITE_ENABLE);
-  SPI2_CS_HIGH();
-  DWT_Delay_us(5);
+  uint8_t dummy = 0x00;
+  for(uint16_t i = 0; i < len; i++)
+  {
+    HAL_SPI_TransmitReceive(&W25Q_SPI, &dummy, &data[i], 1, 5000);
+  }
 }
 
-static void W25Q64_WriteDisable(void)
+/* ================= INTERNAL ================= */
+
+static void write_enable(void)
 {
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_WRITE_DISABLE);
-  SPI2_CS_HIGH();
-  DWT_Delay_us(5);
+  uint8_t cmd = 0x06;
+  csLOW();
+  SPI_Write(&cmd, 1);
+  csHIGH();
 }
 
-/* ================= PUBLIC API (Byte Address) ================= */
-
-void W25Q64_Reset(void)
+static void write_disable(void)
 {
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_RESET_ENABLE);
-  SPI2_Transfer(W25Q64_CMD_RESET);
-  while(SPI2->SR & SPI_SR_BSY);
-  SPI2_CS_HIGH();
-  DWT_Delay_ms(100);
+  uint8_t cmd = 0x04;
+  csLOW();
+  SPI_Write(&cmd, 1);
+  csHIGH();
 }
 
-uint32_t W25Q64_ReadID(void)
+static uint8_t W25Q_ReadStatus(void)
 {
-  uint8_t rData[3];
-
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_READ_ID);
-  rData[0] = SPI2_Transfer(0xFF);
-  rData[1] = SPI2_Transfer(0xFF);
-  rData[2] = SPI2_Transfer(0xFF);
-  SPI2_CS_HIGH();
-
-  return ((rData[0] << 16) | (rData[1] << 8) | rData[2]);
-}
-
-uint8_t W25Q64_ReadStatus(void)
-{
+  uint8_t cmd = 0x05;
   uint8_t status;
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_READ_STATUS);
-  status = SPI2_Transfer(0xFF);
-  SPI2_CS_HIGH();
+
+  csLOW();
+  SPI_Write(&cmd, 1);
+  SPI_Read(&status, 1);
+  csHIGH();
+
   return status;
 }
 
-void W25Q64_Read(uint32_t addr, uint8_t *data, uint32_t len)
+static void W25Q_WaitForWriteEnd(void)
 {
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_READ_DATA);
-  SPI2_Transfer((addr >> 16) & 0xFF);
-  SPI2_Transfer((addr >> 8) & 0xFF);
-  SPI2_Transfer(addr & 0xFF);
-
-  for(uint32_t i = 0; i < len; i++)
+  while(W25Q_ReadStatus() & 0x01)
   {
-    data[i] = SPI2_Transfer(0xFF);
+    W25Q_Delay(1);
   }
-
-  SPI2_CS_HIGH();
-  DWT_Delay_us(5);
 }
 
-void W25Q64_FastRead(uint32_t addr, uint8_t *data, uint32_t len)
+/* ================= PUBLIC API ================= */
+
+void W25Q_Reset(void)
 {
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_FAST_READ);
-  SPI2_Transfer((addr >> 16) & 0xFF);
-  SPI2_Transfer((addr >> 8) & 0xFF);
-  SPI2_Transfer(addr & 0xFF);
-  SPI2_Transfer(0x00);  // Dummy byte
-
-  for(uint32_t i = 0; i < len; i++)
-  {
-    data[i] = SPI2_Transfer(0xFF);
-  }
-
-  SPI2_CS_HIGH();
-  DWT_Delay_us(5);
+  uint8_t tData[2];
+  tData[0] = 0x66;  // enable Reset
+  tData[1] = 0x99;  // Reset
+  csLOW();
+  SPI_Write(tData, 2);
+  csHIGH();
+  W25Q_Delay(100);
 }
 
-void W25Q64_EraseSector(uint32_t addr)
+uint32_t W25Q_ReadID(void)
 {
-  W25Q64_WriteEnable();
-
-  SPI2_CS_LOW();
-  SPI2_Transfer(W25Q64_CMD_SECTOR_ERASE);
-  SPI2_Transfer((addr >> 16) & 0xFF);
-  SPI2_Transfer((addr >> 8) & 0xFF);
-  SPI2_Transfer(addr & 0xFF);
-  while(SPI2->SR & SPI_SR_BSY);
-  SPI2_CS_HIGH();
-
-  W25Q64_WaitForReady();
-  W25Q64_WriteDisable();
+  uint8_t tData = 0x9F;  // Read JEDEC ID
+  uint8_t rData[3];
+  csLOW();
+  SPI_Write(&tData, 1);
+  SPI_Read(rData, 3);
+  csHIGH();
+  return ((rData[0] << 16) | (rData[1] << 8) | rData[2]);
 }
 
-void W25Q64_Erase(uint32_t start_addr, uint32_t size)
+void W25Q_Erase(uint32_t start_addr, uint32_t size)
 {
-  uint32_t first_sector = start_addr / W25Q64_SECTOR_SIZE;
-  uint32_t last_sector = (start_addr + size - 1) / W25Q64_SECTOR_SIZE;
+  uint32_t first_sector = start_addr / W25Q_SECTOR_SIZE;
+  uint32_t last_sector = (start_addr + size - 1) / W25Q_SECTOR_SIZE;
 
   for(uint32_t sector = first_sector; sector <= last_sector; sector++)
   {
-    W25Q64_EraseSector(sector * W25Q64_SECTOR_SIZE);
+    uint32_t addr = sector * W25Q_SECTOR_SIZE;
+    uint8_t cmd[5];
+
+    write_enable();
+
+    if(chipSizeinmb < 256)
+    {
+      cmd[0] = 0x20; // Sector Erase (3-byte address)
+      cmd[1] = (addr >> 16) & 0xFF;
+      cmd[2] = (addr >> 8) & 0xFF;
+      cmd[3] = addr & 0xFF;
+
+      csLOW();
+      SPI_Write(cmd, 4);
+      csHIGH();
+    }
+    else
+    {
+      cmd[0] = 0x21; // Sector Erase (4-byte address)
+      cmd[1] = (addr >> 24) & 0xFF;
+      cmd[2] = (addr >> 16) & 0xFF;
+      cmd[3] = (addr >> 8) & 0xFF;
+      cmd[4] = addr & 0xFF;
+
+      csLOW();
+      SPI_Write(cmd, 5);
+      csHIGH();
+    }
+
+    W25Q_WaitForWriteEnd();
+    write_disable();
   }
 }
 
-void W25Q64_Write(uint32_t addr, uint8_t *data, uint32_t len)
+void W25Q_Write(uint32_t addr, uint8_t *buf, uint16_t len)
 {
   uint32_t to_write;
   uint32_t page_remain;
 
   while(len > 0)
   {
-    page_remain = W25Q64_PAGE_SIZE - (addr % W25Q64_PAGE_SIZE);
+    page_remain = W25Q_PAGE_SIZE - (addr % W25Q_PAGE_SIZE);
     to_write = (len < page_remain) ? len : page_remain;
 
-    W25Q64_WriteEnable();
+    write_enable();
 
-    SPI2_CS_LOW();
-    SPI2_Transfer(W25Q64_CMD_PAGE_PROGRAM);
-    SPI2_Transfer((addr >> 16) & 0xFF);
-    SPI2_Transfer((addr >> 8) & 0xFF);
-    SPI2_Transfer(addr & 0xFF);
-
-    for(uint32_t i = 0; i < to_write; i++)
+    uint8_t cmd[5];
+    if(chipSizeinmb < 256)
     {
-      SPI2_Transfer(data[i]);
+      cmd[0] = 0x02; // Page Program
+      cmd[1] = (addr >> 16) & 0xFF;
+      cmd[2] = (addr >> 8) & 0xFF;
+      cmd[3] = addr & 0xFF;
+
+      csLOW();
+      SPI_Write(cmd, 4);
+    }
+    else
+    {
+      cmd[0] = 0x12; // Page Program (4-byte)
+      cmd[1] = (addr >> 24) & 0xFF;
+      cmd[2] = (addr >> 16) & 0xFF;
+      cmd[3] = (addr >> 8) & 0xFF;
+      cmd[4] = addr & 0xFF;
+
+      csLOW();
+      SPI_Write(cmd, 5);
     }
 
-    while(SPI2->SR & SPI_SR_BSY);
-    SPI2_CS_HIGH();
+    SPI_Write(buf, to_write);
+    csHIGH();
 
-    W25Q64_WaitForReady();
-    W25Q64_WriteDisable();
+    W25Q_WaitForWriteEnd();
+    write_disable();
 
     addr += to_write;
-    data += to_write;
+    buf += to_write;
     len -= to_write;
   }
 }
+
+void W25Q_Read(uint32_t addr, uint8_t *data, uint16_t len)
+{
+  uint8_t cmd[6];   // opcode + max 4 address bytes + dummy (optional)
+  uint16_t idx;
+
+  while(len > 0)
+  {
+    idx = 0;
+
+    if(chipSizeinmb < 256)
+    {
+      cmd[idx++] = 0x03;   // READ (3-byte address)
+      cmd[idx++] = (addr >> 16) & 0xFF;
+      cmd[idx++] = (addr >> 8) & 0xFF;
+      cmd[idx++] = addr & 0xFF;
+    }
+    else
+    {
+      cmd[idx++] = 0x13;   // READ (4-byte address)
+      cmd[idx++] = (addr >> 24) & 0xFF;
+      cmd[idx++] = (addr >> 16) & 0xFF;
+      cmd[idx++] = (addr >> 8) & 0xFF;
+      cmd[idx++] = addr & 0xFF;
+    }
+
+    csLOW();
+    SPI_Write(cmd, idx);
+    SPI_Read(data, len);   // continuous read is allowed
+    csHIGH();
+
+    /* All bytes consumed in one transaction */
+    break;
+  }
+}
+
+void W25Q_FastRead(uint32_t addr, uint8_t *data, uint16_t len)
+{
+  uint8_t cmd[7];
+  uint16_t idx;
+
+  while(len > 0)
+  {
+    idx = 0;
+
+    if(chipSizeinmb < 256)
+    {
+      cmd[idx++] = 0x0B;   // FAST READ (3-byte addr)
+      cmd[idx++] = (addr >> 16) & 0xFF;
+      cmd[idx++] = (addr >> 8) & 0xFF;
+      cmd[idx++] = addr & 0xFF;
+      cmd[idx++] = 0x00;   // dummy
+    }
+    else
+    {
+      cmd[idx++] = 0x0C;   // FAST READ (4-byte addr)
+      cmd[idx++] = (addr >> 24) & 0xFF;
+      cmd[idx++] = (addr >> 16) & 0xFF;
+      cmd[idx++] = (addr >> 8) & 0xFF;
+      cmd[idx++] = addr & 0xFF;
+      cmd[idx++] = 0x00;   // dummy
+    }
+
+    csLOW();
+    SPI_Write(cmd, idx);
+    SPI_Read(data, len);
+    csHIGH();
+
+    break;
+  }
+}
+

@@ -10,24 +10,21 @@
 
 #include <stdint.h>
 
+/* ================= PUBLIC FUNCTIONS ================= */
+
 // Initialize OTA handler
 void OTA_Handler_Init(void);
 
-// Check if OTA button was pressed
+// Check if OTA button was pressed (call in main loop)
 void OTA_Check_Trigger(void);
 
-// Process OTA download
-void OTA_Process_Task(void);
-
-// Update LCD display with OTA progress
-void OTA_Update_Display(void);
-
-// Get current OTA status
+// Check if OTA is currently in progress
 uint8_t OTA_Is_In_Progress(void);
-uint8_t OTA_Is_Complete(void);
-uint8_t OTA_Has_Error(void);
 
-// External flag for button interrupt
+// Verify W25Q64 content (for debugging)
+void Verify_W25Q64_Content(void);
+
+// External flag for button interrupt (set from button.c)
 extern volatile uint8_t ota_button_trigger;
 
 #endif /* INC_OTA_HANDLER_H_ */

@@ -11,15 +11,12 @@
 #include "lcd.h"
 #include "usart2.h"
 #include "dwt.h"
+#include "w25q64.h"
 #include <string.h>
 #include <stdio.h>
 
 /* ================= GLOBAL VARIABLES ================= */
 volatile uint8_t ota_button_trigger = 0;
-static uint8_t ota_in_progress = 0;
-static uint8_t ota_progress_percent = 0;
-static uint8_t ota_complete = 0;
-static uint8_t ota_error = 0;
 
 /* ================= PRIVATE FUNCTIONS ================= */
 static void show_ota_start(void)
@@ -48,80 +45,16 @@ static void show_ota_failed(void)
   USART2_SendString("\r\n*** OTA Failed! ***\r\n");
 }
 
-static void reset_ota_state(void)
-{
-  ota_in_progress = 0;
-  ota_progress_percent = 0;
-  ota_complete = 0;
-  ota_error = 0;
-}
-
-/* ================= PUBLIC FUNCTIONS ================= */
-
-void OTA_Handler_Init(void)
-{
-  reset_ota_state();
-  ota_button_trigger = 0;
-  USART2_SendString("OTA Handler Initialized\r\n");
-}
-
-void OTA_Check_Trigger(void)
-{
-  if(ota_button_trigger == 1)
-  {
-    ota_button_trigger = 0;
-
-    if(!ota_in_progress)
-    {
-      show_ota_start();
-      ota_start();
-      ota_in_progress = 1;
-    }
-  }
-}
-
-void OTA_Process_Task(void)
-{
-  if(!ota_in_progress)
-    return;
-
-  // Process OTA data
-  ESP8266_OTA_Task();
-
-  // Update progress (you can add actual progress tracking)
-  // ota_progress_percent = ESP8266_OTA_GetProgress();
-
-  // Check completion
-  if(ESP8266_OTA_IsComplete())
-  {
-    show_ota_complete();
-    ota_complete = 1;
-    DWT_Delay_ms(1000);
-    enable_ota_request();  // This will reset the system
-  }
-  else if(ESP8266_OTA_HasError())
-  {
-    show_ota_failed();
-    ota_error = 1;
-    ota_in_progress = 0;
-    DWT_Delay_ms(2000);
-    reset_ota_state();
-  }
-}
-
-void OTA_Update_Display(void)
+static void show_ota_progress(uint8_t percent)
 {
   char buffer[17];
 
-  if(!ota_in_progress)
-    return;
-
-  sprintf(buffer, "Download %3d%%", ota_progress_percent);
+  sprintf(buffer, "Download %3d%%", percent);
   LCD_SetCursor(0, 0);
   LCD_SendString(buffer);
 
   sprintf(buffer, "[");
-  uint8_t blocks = ota_progress_percent / 10;
+  uint8_t blocks = percent / 10;
   for(uint8_t i = 0; i < blocks; i++)
   {
     strcat(buffer, "=");
@@ -135,17 +68,132 @@ void OTA_Update_Display(void)
   LCD_SendString(buffer);
 }
 
+/* ================= PUBLIC FUNCTIONS ================= */
+
+void OTA_Handler_Init(void)
+{
+  ota_button_trigger = 0;
+  USART2_SendString("OTA Handler Initialized\r\n");
+}
+
+void Verify_W25Q64_Content(void)
+{
+  uint8_t buffer[256];
+  uint32_t addr;
+
+  USART2_SendString("\r\n=== Verifying W25Q64 Content ===\r\n");
+
+  // Read and display first 64 bytes (where header should be)
+  USART2_SendString("First 64 bytes at address 0:\r\n");
+  W25Q64_FastRead(0, buffer, 64);
+
+  for(int i = 0; i < 64; i++)
+  {
+    if(i % 16 == 0)
+    {
+      USART2_SendString("\r\n");
+      USART2_SendHex((i >> 8) & 0xFF);
+      USART2_SendHex(i & 0xFF);
+      USART2_SendString(": ");
+    }
+    USART2_SendHex(buffer[i]);
+    USART2_SendChar(' ');
+  }
+  USART2_SendString("\r\n\r\n");
+
+  // Check magic number (first 4 bytes should be 0xDEADBEEF)
+  uint32_t magic = *(uint32_t*) buffer;
+  USART2_SendString("Magic number: 0x");
+  USART2_SendHex((magic >> 24) & 0xFF);
+  USART2_SendHex((magic >> 16) & 0xFF);
+  USART2_SendHex((magic >> 8) & 0xFF);
+  USART2_SendHex(magic & 0xFF);
+  USART2_SendString("\r\n");
+
+  if(magic == 0xDEADBEEF)
+  {
+    USART2_SendString("✓ Magic number CORRECT! Firmware header found.\r\n");
+
+    // Read the header structure
+    uint32_t image_size = *(uint32_t*) (buffer + 4);
+    uint32_t crc = *(uint32_t*) (buffer + 8);
+    uint32_t version = *(uint32_t*) (buffer + 12);
+
+    USART2_SendString("Image size: ");
+    USART2_SendNumber(image_size);
+    USART2_SendString(" bytes\r\n");
+    USART2_SendString("CRC: 0x");
+    USART2_SendHex((crc >> 24) & 0xFF);
+    USART2_SendHex((crc >> 16) & 0xFF);
+    USART2_SendHex((crc >> 8) & 0xFF);
+    USART2_SendHex(crc & 0xFF);
+    USART2_SendString("\r\n");
+    USART2_SendString("Version: ");
+    USART2_SendNumber(version);
+    USART2_SendString("\r\n");
+  }
+  else
+  {
+    USART2_SendString("✗ Magic number WRONG! No valid firmware header.\r\n");
+    USART2_SendString("Expected: 0xDEADBEEF\r\n");
+  }
+
+  // Also check a few more locations
+  USART2_SendString("\r\nChecking other locations:\r\n");
+
+  // Read at offset 512
+  W25Q64_FastRead(512, buffer, 16);
+  USART2_SendString("Offset 512: ");
+  for(int i = 0; i < 16; i++)
+  {
+    USART2_SendHex(buffer[i]);
+    USART2_SendChar(' ');
+  }
+  USART2_SendString("\r\n");
+
+  // Read at offset 1024
+  W25Q64_FastRead(1024, buffer, 16);
+  USART2_SendString("Offset 1024: ");
+  for(int i = 0; i < 16; i++)
+  {
+    USART2_SendHex(buffer[i]);
+    USART2_SendChar(' ');
+  }
+  USART2_SendString("\r\n");
+
+  USART2_SendString("=== Verification Complete ===\r\n");
+}
+
+void OTA_Check_Trigger(void)
+{
+  if(ota_button_trigger == 1)
+  {
+    ota_button_trigger = 0;
+
+    show_ota_start();
+
+    // Start OTA - this will block until complete or error
+    ota_start();
+
+    // After ota_start() returns, check result
+    if(ESP8266_OTA_IsComplete())
+    {
+      Verify_W25Q64_Content();
+      show_ota_complete();
+      DWT_Delay_ms(1000);
+      enable_ota_request();  // This will reset the system
+    }
+    else if(ESP8266_OTA_HasError())
+    {
+      show_ota_failed();
+      DWT_Delay_ms(2000);
+    }
+  }
+}
+
 uint8_t OTA_Is_In_Progress(void)
 {
-  return ota_in_progress;
-}
-
-uint8_t OTA_Is_Complete(void)
-{
-  return ota_complete;
-}
-
-uint8_t OTA_Has_Error(void)
-{
-  return ota_error;
+  // Use ota_active from esp8266_ota.c
+  extern volatile uint8_t ota_active;
+  return ota_active;
 }

@@ -6,3 +6,5 @@
 .mxproject
 
 Debug/
+
+*.launch

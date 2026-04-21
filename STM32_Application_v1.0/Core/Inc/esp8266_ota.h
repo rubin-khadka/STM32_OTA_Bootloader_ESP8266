@@ -37,4 +37,6 @@ void ota_start(void);
 uint8_t ESP8266_OTA_IsComplete(void);
 uint8_t ESP8266_OTA_HasError(void);
 
+void ESP8266_Test_Receive(void);
+
 #endif /* INC_ESP8266_OTA_H_ */
