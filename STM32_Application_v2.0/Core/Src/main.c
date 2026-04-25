@@ -36,6 +36,7 @@
 #include "dht11.h"
 #include "ds3231.h"
 #include "button.h"
+#include "mpu6050.h"
 
 #include "tasks.h"
 
@@ -56,6 +57,7 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define MPU_READ_TICKS        5
 #define DHT11_READ_TICKS      100
 #define LCD_UPDATE_TICKS      10
 /* USER CODE END PM */
@@ -74,8 +76,8 @@ DMA_HandleTypeDef hdma_usart1_rx;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_SPI2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_SPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -120,8 +122,8 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_SPI2_Init();
   MX_USART1_UART_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 
   DWT_Init();
@@ -170,16 +172,19 @@ int main(void)
   // Initialize sensors
   DS3231_Init();
   DHT11_Init();
+  MPU6050_Init();
 
   // Loop counters
   uint16_t dht_count = 0;
   uint16_t lcd_count = 0;
+  uint16_t mpu_count = 0;
 
   Button_Init();
 
   TIMER2_Delay_ms(2000);
 
   TIMER3_SetupPeriod(10);  // 10ms period
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -209,6 +214,13 @@ int main(void)
       {
         dht_count = 0;
         Task_DHT11_Read();
+      }
+
+      // Read MPU6050 every 50ms
+      if(mpu_count++ >= MPU_READ_TICKS)
+      {
+        mpu_count = 0;
+        Task_MPU6050_Read();
       }
 
       // Update LCD every 100ms
