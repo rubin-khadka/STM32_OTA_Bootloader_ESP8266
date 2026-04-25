@@ -45,4 +45,3 @@ void flash_write_word(uint32_t addr, uint32_t data)
 {
   HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, data);
 }
-

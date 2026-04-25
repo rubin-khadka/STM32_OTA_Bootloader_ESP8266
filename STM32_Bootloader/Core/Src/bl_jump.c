@@ -28,8 +28,6 @@ void Jump_To_Application(void)
 
   /* Disable interrupts */
   __disable_irq();
-  __DSB();  // Data Synchronization Barrier
-  __ISB();  // Instruction Synchronization Barrier
 
   /* Stop SysTick */
   SysTick->CTRL = 0;

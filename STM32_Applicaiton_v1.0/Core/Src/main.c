@@ -21,14 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "bl_jump.h"
-#include "bl_ota.h"
-#include "flash_layout.h"
 
-#include "usart2.h"
-#include "w25q64.h"
-
-#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,6 +42,9 @@
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi2;
 
+UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -56,33 +52,15 @@ SPI_HandleTypeDef hspi2;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_SPI2_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-static uint32_t mem_base = 0;
-static uint32_t mem_cursor = 0;
-static uint32_t ota_image_total_size = 16;  // expected OTA Header size
-
-void ota_mem_set_total_size(uint32_t size)
-{
-  ota_image_total_size = size;
-}
-
-int ota_read_mem(uint8_t *buf, uint32_t len)
-{
-  if(mem_cursor + len > ota_image_total_size)
-    return -1;
-
-  W25Q_FastRead(mem_base + mem_cursor, buf, len);
-
-  mem_cursor += len;
-  return 0;
-}
 
 /* USER CODE END 0 */
 
@@ -115,76 +93,10 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_SPI2_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
-  USART2_Init();
-
-  USART2_SendString("Bootloader Started\r\n");
-
-  // Initialize and verify W25Q64
-  W25Q_Reset();
-  uint32_t id = W25Q_ReadID();
-
-  if(id != 0xEF4017)
-  {
-    USART2_SendString("ERROR: W25Q64 not found!\r\n");
-  }
-  else
-  {
-    USART2_SendString("W25Q64 OK\r\n");
-  }
-
-  if(check_ota_request() == 0)
-  {
-    USART2_SendString("OTA Requested... Flashing..\r\n");
-
-    ota_stream_t stream = { .read = ota_read_mem, .set_total_size = ota_mem_set_total_size };
-
-    bl_ota_ctx_t ctx;
-    if(bl_ota_run(&ctx, &stream) != 0)
-    {
-      USART2_SendString("OTA Failed...\r\n");
-      while(1)
-      {
-
-      }
-    }
-
-    else
-    {
-      USART2_SendString("OTA Flashed Successfully\r\n");
-    }
-  }
-
-  BootloaderError_t err = Bootloader_Is_App_Valid();
-
-  switch(err)
-  {
-    case BOOT_SUCCESS:
-      USART2_SendString("App Valid - Jumping...\r\n");
-      HAL_Delay(10);
-      Jump_To_Application();
-      break;
-
-    case MAGIC_ERROR:
-      USART2_SendString("Magic Error\r\n");
-      break;
-
-    case CRC_ERROR:
-      USART2_SendString("CRC Error\r\n");
-      break;
-
-    case RESET_ERROR:
-      USART2_SendString("Reset Error\r\n");
-      break;
-
-    case SIZE_ERROR:
-      USART2_SendString("Size Error\r\n");
-      break;
-  }
-
-  USART2_SendString("Staying in Bootloader\r\n");
 
   /* USER CODE END 2 */
 
@@ -235,10 +147,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-
-  /** Enables the Clock Security System
-   */
-  HAL_RCC_EnableCSS();
 }
 
 /**
@@ -280,6 +188,55 @@ static void MX_SPI2_Init(void)
 }
 
 /**
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if(HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+ * Enable DMA controller clock
+ */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+
+}
+
+/**
  * @brief GPIO Initialization Function
  * @param None
  * @retval None
@@ -297,13 +254,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : CS_Pin */
   GPIO_InitStruct.Pin = CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(CS_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
