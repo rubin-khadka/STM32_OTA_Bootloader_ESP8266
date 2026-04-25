@@ -10,6 +10,7 @@
 #include "flash_operations.h"
 #include "app_ota.h"
 #include "W25Q64.h"
+#include "lcd.h"
 
 #include "usart2.h"
 
@@ -20,17 +21,29 @@
 /* ================= CONFIG ================= */
 #define ESP_DMA_RX_BUF_SIZE     1024
 #define OTA_RX_BUF_SIZE         512
-#define OTA_ACK_CHUNK     512
-#define OTA_FLASH_OFFSET    0
+#define OTA_ACK_CHUNK           512
+#define OTA_FLASH_OFFSET        0
 
 #define WiFi_ssid               "mynoobu"
 #define WiFi_pssd               "Sarah159!"
 #define SERVER_IP               "10.100.193.65"
 #define SERVER_PORT             5678
 
+/* ================= OTA STAGES ================= */
+#define OTA_STAGE_IDLE          0
+#define OTA_STAGE_CONNECTING    1
+#define OTA_STAGE_RECEIVING     2
+#define OTA_STAGE_WRITING       3
+#define OTA_STAGE_VERIFYING     4
+#define OTA_STAGE_COMPLETE      5
+#define OTA_STAGE_ERROR         6
+
 /* ================================== */
 ESP8266_ConnectionState ESP_ConnState = ESP8266_DISCONNECTED;
 volatile uint8_t ota_active = 0;   // OTA running flag
+volatile uint8_t ota_status_stage = OTA_STAGE_IDLE;
+volatile uint32_t ota_progress_current = 0;
+volatile uint32_t ota_progress_total = 0;
 
 uint8_t esp_dma_rx_buf[ESP_DMA_RX_BUF_SIZE];
 volatile uint16_t esp_dma_rx_head = 0;
@@ -67,6 +80,136 @@ static void ota_finalize(void);
 static void ota_error(void);
 
 static ota_image_hdr_t ota_hdr;
+
+/* ================= LCD DISPLAY FUNCTIONS ================= */
+
+static void LCD_DisplayOTAMessage(uint8_t stage)
+{
+  LCD_Clear();
+  LCD_SetCursor(0, 0);
+
+  switch(stage)
+  {
+    case OTA_STAGE_CONNECTING:
+      LCD_SendString("OTA Update");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Connecting WiFi...");
+      break;
+    case OTA_STAGE_RECEIVING:
+      LCD_SendString("OTA Update");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Receiving FW...");
+      break;
+    case OTA_STAGE_WRITING:
+      LCD_SendString("OTA Update");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Writing Flash...");
+      break;
+    case OTA_STAGE_VERIFYING:
+      LCD_SendString("OTA Update");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Verifying...");
+      break;
+    case OTA_STAGE_COMPLETE:
+      LCD_SendString("OTA Complete!");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Resetting...");
+      break;
+    case OTA_STAGE_ERROR:
+      LCD_SendString("OTA FAILED!");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("See USART...");
+      break;
+    default:
+      LCD_SendString("OTA Update");
+      LCD_SetCursor(1, 0);
+      LCD_SendString("Processing...");
+      break;
+  }
+}
+
+static void LCD_DisplayOTAProgress(uint32_t current, uint32_t total)
+{
+  uint8_t percentage;
+  uint8_t bars;
+
+  if(total > 0)
+  {
+    percentage = (current * 100) / total;
+  }
+  else
+  {
+    percentage = 0;
+  }
+
+  // Calculate progress bars (16 characters max)
+  bars = (percentage * 16) / 100;
+
+  // Show percentage on top line at column 10
+  LCD_SetCursor(0, 10);
+
+  // Format percentage (e.g., "45%")
+  if(percentage < 10)
+  {
+    LCD_SendData(' ');
+    LCD_SendData(' ');
+    LCD_SendData('0' + percentage);
+  }
+  else if(percentage < 100)
+  {
+    LCD_SendData(' ');
+    LCD_SendData('0' + (percentage / 10));
+    LCD_SendData('0' + (percentage % 10));
+  }
+  else
+  {
+    LCD_SendData('0' + (percentage / 100));
+    LCD_SendData('0' + ((percentage / 10) % 10));
+    LCD_SendData('0' + (percentage % 10));
+  }
+  LCD_SendData('%');
+
+  // Draw progress bar on line 2
+  LCD_SetCursor(1, 0);
+  for(uint8_t i = 0; i < bars; i++)
+  {
+    LCD_SendData(0xFF);  // Full block character
+  }
+  for(uint8_t i = bars; i < 16; i++)
+  {
+    LCD_SendData(' ');   // Space
+  }
+}
+
+static void LCD_DisplayOTAError(uint8_t error_type)
+{
+  LCD_Clear();
+  LCD_SetCursor(0, 0);
+  LCD_SendString("OTA FAILED!");
+
+  LCD_SetCursor(1, 0);
+  switch(error_type)
+  {
+    case 1:
+      LCD_SendString("WiFi Connect Err");
+      break;
+    case 2:
+      LCD_SendString("Server Connect Err");
+      break;
+    case 3:
+      LCD_SendString("Flash Error");
+      break;
+    case 4:
+      LCD_SendString("CRC Error");
+      break;
+    case 5:
+      LCD_SendString("Timeout");
+      break;
+    default:
+      LCD_SendString("Unknown Error");
+      break;
+  }
+}
 
 /* ================= LOGGING MACROS ================= */
 #define USER_LOG(msg) \
@@ -444,8 +587,14 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
       // ───────────── OTA WRITE LOGIC ────────────────
       if(!flash_erased)
       {
+        ota_status_stage = OTA_STAGE_WRITING;
+        LCD_DisplayOTAMessage(ota_status_stage);
+
         erase_ota_flash();
         flash_erased = 1;
+
+        ota_status_stage = OTA_STAGE_RECEIVING;
+        LCD_DisplayOTAMessage(ota_status_stage);
       }
 
       uint32_t prev_received = bytes_received;
@@ -467,6 +616,10 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
           if(bytes_received >= OTA_HEADER_SIZE)
           {
             header_received = 1;
+
+            // Set total size for progress display
+            ota_progress_total = ota_hdr.image_size + OTA_HEADER_SIZE;
+
             if(ota_hdr.magic != APP_MAGIC)
             {
               USART2_SendString("[USER] Invalid Header Received: magic=0x");
@@ -525,6 +678,11 @@ static void ota_process_rx(uint8_t *data, uint16_t len)
 
       actually_written = bytes_received - prev_received;
       bytes_in_chunk += actually_written;
+
+      // Update progress display
+      ota_progress_current = bytes_received;
+      LCD_DisplayOTAProgress(ota_progress_current, ota_progress_total);
+
       USART2_SendString("[USER] bytes_received so far = ");
       USART2_SendNumber(bytes_received);
       USART2_SendString(", Actually Written = ");
@@ -655,13 +813,26 @@ void ota_start(void)
 {
   char ip[16];
 
+  // Update LCD - Connecting to WiFi
+  ota_status_stage = OTA_STAGE_CONNECTING;
+  LCD_DisplayOTAMessage(ota_status_stage);
+
   if(ESP_Init() != ESP8266_OK)
+  {
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(1);
     return;
+  }
 
   char cmd[128];
   USER_LOG("Connecting to Wifi..");
+
   if(ESP_ConnectWiFi(WiFi_ssid, WiFi_pssd, ip, sizeof(ip)) != ESP8266_OK)
+  {
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(1);
     return;
+  }
 
   // wait to obtain the IP address
   USER_LOG("Obtaining IP address..");
@@ -670,14 +841,22 @@ void ota_start(void)
 
   // Disable Multiple connections
   if(ESP_SendCommand("AT+CIPMUX=0\r\n", "OK", 2000) != ESP8266_OK)
+  {
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(2);
     return;
+  }
 
   // Connect to the Server
   USER_LOG("Connecting to TCP SERVER");
   snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", SERVER_IP, SERVER_PORT);
 
   if(ESP_SendCommand(cmd, "CONNECT", 5000) != ESP8266_OK)
+  {
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(2);
     return;
+  }
 
   ota_active = 1;
 
@@ -695,6 +874,14 @@ void ota_start(void)
   last_bytes_received = 0;
   bytes_in_chunk = 0;
 
+  // Reset progress tracking
+  ota_progress_current = 0;
+  ota_progress_total = 0;
+
+  // Update LCD - Receiving
+  ota_status_stage = OTA_STAGE_RECEIVING;
+  LCD_DisplayOTAMessage(ota_status_stage);
+
   // Request server to start sending data
   USER_LOG("Starting Reception..");
   const char req[] = "GET firmware\r\n";
@@ -702,12 +889,16 @@ void ota_start(void)
   if(ESP_SendCommand(cmd, ">", 2000) != ESP8266_OK)
   {
     ota_state = OTA_ERROR;
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(5);
     return;
   }
 
   if(ESP_SendCommand((char*) req, "SEND OK", 2000) != ESP8266_OK)
   {
     ota_state = OTA_ERROR;
+    ota_status_stage = OTA_STAGE_ERROR;
+    LCD_DisplayOTAError(5);
     return;
   }
 
@@ -719,7 +910,25 @@ void ota_start(void)
 /* ================= OTA FINALIZE ================= */
 static void ota_finalize(void)
 {
+  ota_status_stage = OTA_STAGE_VERIFYING;
+  LCD_DisplayOTAMessage(ota_status_stage);
+
   USER_LOG("OTA Written Successful, Data verified. Rebooting Now..\n\n");
+
+  // Verify the written firmware one more time
+  ota_image_hdr_t verify_hdr;
+  W25Q_Read(0, (uint8_t*) &verify_hdr, sizeof(ota_image_hdr_t));
+
+  if(verify_hdr.magic == APP_MAGIC)
+  {
+    LCD_DisplayOTAMessage(OTA_STAGE_COMPLETE);
+  }
+  else
+  {
+    LCD_DisplayOTAError(4);
+    HAL_Delay(3000);
+  }
+
   ESP_SendCommand("AT+CIPCLOSE\r\n", "OK", 2000);
   ota_active = 0;
   ota_state = OTA_COMPLETED;
@@ -728,9 +937,14 @@ static void ota_finalize(void)
 
 static void ota_error(void)
 {
+  ota_status_stage = OTA_STAGE_ERROR;
+  LCD_DisplayOTAError(5);
+
   USER_LOG("OTA Failed.. Try again");
   ESP_SendCommand("AT+CIPCLOSE\r\n", "OK", 2000);
   ota_active = 0;
   ota_state = OTA_ERROR;
   USART2_SendString("Application will resume\n");
+
+  HAL_Delay(2000);
 }

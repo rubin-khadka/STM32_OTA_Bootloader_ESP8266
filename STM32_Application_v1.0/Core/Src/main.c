@@ -25,7 +25,23 @@
 #include "app_header.h"
 #include "esp8266_ota.h"
 
+#include "dwt.h"
+#include "timer2.h"
+#include "timer3.h"
 #include "usart2.h"
+#include "i2c2.h"
+
+#include "lcd.h"
+#include "w25q64.h"
+#include "dht11.h"
+#include "ds3231.h"
+#include "button.h"
+
+#include "tasks.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,7 +56,8 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define DHT11_READ_TICKS      100
+#define LCD_UPDATE_TICKS      10
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -66,18 +83,16 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 extern volatile uint8_t ota_active;
-uint8_t ota_begin = 0;
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  ota_begin = 1;
-}
+extern volatile uint8_t ota_begin;
+extern volatile uint8_t ota_status_stage;
+extern volatile uint32_t ota_progress_current;
+extern volatile uint32_t ota_progress_total;
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -109,14 +124,62 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  DWT_Init();
+  TIMER2_Init();
+  TIMER4_Init();
   USART2_Init();
+  I2C2_Init();
+  LCD_Init();
 
-  int version = ((app_header_t*) APP_HEADER_ADDR)->version;
+  USART2_SendString("\r\nInside Application !!!\r\n");
 
-  USART2_SendString("Inside Application.. VERSION: ");
+  // Read current app version from header
+  app_header_t *header = (app_header_t*) APP_HEADER_ADDR;
+  int version = (header->magic == APP_MAGIC) ? header->version : 0;
+
+  // Welcome Message
+  LCD_Clear();
+  LCD_SetCursor(0, 0);
+  LCD_SendString("Sensor Monitor");
+  LCD_SetCursor(1, 0);
+
+  // Show version on second line
+  char version_str[17];
+  sprintf(version_str, "System v%d", version);
+  LCD_SendString(version_str);
+
+  USART2_SendString("\r\n====================================\r\n");
+  USART2_SendString("Sensor Monitoring System v");
   USART2_SendNumber(version);
   USART2_SendString("\r\n");
+  USART2_SendString("====================================\r\n\r\n");
 
+  // W25Q64 Flash Initialize
+  W25Q_Reset();
+  uint32_t id = W25Q_ReadID();
+
+  if(id != 0xEF4017)
+  {
+    USART2_SendString("ERROR: W25Q64 not found!\r\n");
+  }
+  else
+  {
+    USART2_SendString("W25Q64 OK\r\n");
+  }
+
+  // Initialize sensors
+  DS3231_Init();
+  DHT11_Init();
+
+  // Loop counters
+  uint16_t dht_count = 0;
+  uint16_t lcd_count = 0;
+
+  Button_Init();
+
+  TIMER2_Delay_ms(2000);
+
+  TIMER3_SetupPeriod(10);  // 10ms period
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,11 +189,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
     if(ota_begin == 1)
     {
-      HAL_Delay(500);  // debounce
       ota_begin = 0;
+      USART2_SendString("\r\nStarting OTA Update...\r\n");
       ota_start();
     }
 
@@ -140,24 +202,66 @@ int main(void)
       HAL_Delay(1);
     }
 
-    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
-    HAL_Delay(500);
+    if(ota_active == 0 && ota_status_stage != OTA_STAGE_ERROR && ota_status_stage != OTA_STAGE_COMPLETE)
+    {
+      // Read DHT11 every 1 seconds
+      if(dht_count++ >= DHT11_READ_TICKS)
+      {
+        dht_count = 0;
+        Task_DHT11_Read();
+      }
+
+      // Update LCD every 100ms
+      if(lcd_count++ >= LCD_UPDATE_TICKS)
+      {
+        lcd_count = 0;
+        Task_LCD_Update();
+      }
+    }
+    else if(ota_status_stage == OTA_STAGE_ERROR)
+    {
+      // If OTA error occurred, wait a bit then clear error state
+      static uint32_t error_wait = 0;
+      static uint8_t error_shown = 0;
+
+      if(!error_shown)
+      {
+        error_wait = HAL_GetTick();
+        error_shown = 1;
+      }
+
+      if((HAL_GetTick() - error_wait) > 3000)
+      {  // Show error for 10 seconds
+        ota_status_stage = OTA_STAGE_IDLE;
+        error_shown = 0;
+        LCD_Clear();
+        Task_LCD_Update();  // Restore normal display
+      }
+    }
+    else if(ota_status_stage == OTA_STAGE_COMPLETE)
+    {
+      // OTA completed successfully, will reset soon
+      // Just wait for reset
+      HAL_Delay(100);
+    }
+
+    TIMER3_WaitPeriod(); // 10ms heartbeat
   }
   /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -165,31 +269,30 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  if(HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if(HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
 /**
-  * @brief SPI2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI2_Init(void)
 {
 
@@ -213,7 +316,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi2.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  if(HAL_SPI_Init(&hspi2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -224,10 +327,10 @@ static void MX_SPI2_Init(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART1_UART_Init(void)
 {
 
@@ -246,7 +349,7 @@ static void MX_USART1_UART_Init(void)
   huart1.Init.Mode = UART_MODE_TX_RX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+  if(HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -257,8 +360,8 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * Enable DMA controller clock
-  */
+ * Enable DMA controller clock
+ */
 static void MX_DMA_Init(void)
 {
 
@@ -273,40 +376,35 @@ static void MX_DMA_Init(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = { 0 };
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin : PA0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  /*Configure GPIO pin : PC15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : CS_Pin */
   GPIO_InitStruct.Pin = CS_Pin;
@@ -314,10 +412,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(CS_GPIO_Port, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -329,9 +423,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
