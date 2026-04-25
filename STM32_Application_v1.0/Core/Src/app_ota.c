@@ -5,8 +5,6 @@
  *      Author: Rubin Khadka
  */
 
-#include "app_ota.h"
-
 #include "flash_layout.h"
 #include "main.h"
 #include "flash_operations.h"

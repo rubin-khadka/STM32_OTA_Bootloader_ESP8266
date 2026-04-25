@@ -25,7 +25,7 @@
 
 #define WiFi_ssid               "mynoobu"
 #define WiFi_pssd               "Sarah159!"
-#define SERVER_IP               "192.168.1.2"
+#define SERVER_IP               "10.100.193.65"
 #define SERVER_PORT             5678
 
 /* ================================== */
