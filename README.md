@@ -163,12 +163,13 @@ This polynomial (`0xEDB88320`) is the standard CRC-32 used in protocols like Eth
 
 ## OTA Update Flowchart
 
-<img width="833" height="787" alt="flow_chart" src="https://github.com/user-attachments/assets/81d5e0d6-7353-48c7-b9e9-f183b75fba01" />
+<img width="1081" height="1104" alt="flow chart" src="https://github.com/user-attachments/assets/3d8a9ce3-a563-452e-a4fb-64b9c3a53a28" />
+
 
 ## Related Projects 
 - [STM32_MicroSD_Cloud_Logger](https://github.com/rubin-khadka/STM32_MicroSD_Cloud_Logger)
 - [STM32_Custom_Bootloader_CRC](https://github.com/rubin-khadka/STM32_Custom_Bootloader_CRC)
-- [STM32_OTA_Bootloader_ESP8266](https://github.com/rubin-khadka/STM32_OTA_Bootloader_ESP8266)
+- [STM32_OTA_Bootloader_W5500](https://github.com/rubin-khadka/STM32_OTA_Bootloader_W5500)
 
 ## Resources
 - [STM32F103 Datasheet](https://www.st.com/resource/en/datasheet/stm32f103c8.pdf)
