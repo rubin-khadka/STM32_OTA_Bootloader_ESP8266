@@ -147,6 +147,20 @@ The CRC algorithm processes the application firmware byte by byte, performing a 
 
 This polynomial (`0xEDB88320`) is the standard CRC-32 used in protocols like Ethernet, PNG, and ZIP files.
 
+## ESP8266 AT Command Flow
+
+The STM32 sends these AT commands to establish WiFi connection and receive firmware:
+
+| Step | Command | Response |
+|------|---------|----------|
+| 1 | `AT` | OK |
+| 2 | `AT+CWMODE=1` | OK |
+| 3 | `AT+CWJAP="SSID","PASSWORD"` | WIFI CONNECTED |
+| 4 | `AT+CIPSTART="TCP","192.168.1.2",5678` | CONNECT OK |
+| 5 | `AT+CIPSEND=15` | > |
+| 6 | `GET firmware\r\n` | SEND OK |
+| 7 | `+IPD,512:...` | (Firmware data received) |
+
 ## OTA Update Flowchart
 
 <img width="1081" height="1104" alt="flow chart" src="https://github.com/user-attachments/assets/3d8a9ce3-a563-452e-a4fb-64b9c3a53a28" />
