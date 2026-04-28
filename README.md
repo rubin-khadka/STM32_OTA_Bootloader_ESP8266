@@ -34,23 +34,9 @@ The application is a simplified version of the [Multi Sensor Cloud Logger Projec
 - DS3231 - Real Time Clock
 A 16x2 LCD display shows sensor values, and a push button cycles through different display modes.
 
-## Video Demonstrations
-
-### Hardware Demo
-
-// place holder for now
-
-When powered on, the bootloader checks everything and runs Application v1. Application v1 uses two sensors: DHT11 and DS3231. When the button is pressed, OTA update starts (displayed on LCD). After downloading and installing the new firmware, Application v2 loads, which now uses three sensors: DHT11, DS3231, and MPU6050.
-
-### PC Server
-
-// placeholder for now
-
-Shows UART2 debug output and PC server running, waiting for connection from the STM32 client via ESP8266 WiFi. When the button is pressed on the client, the server sends data in chunks of 512 bytes.
-
 ## Project Schematic
 
-<img width="1512" height="752" alt="Schematic Diagram" src="https://github.com/user-attachments/assets/a18a1107-f437-4b55-bfec-7237480d4d15" />
+<img width="1515" height="748" alt="Schematic Diagram" src="https://github.com/user-attachments/assets/e6c703e2-f4a8-4d95-84a2-7d82dc8178e2" />
 
 ## Pin Configuration
 
